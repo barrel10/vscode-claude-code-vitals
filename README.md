@@ -4,7 +4,17 @@ Real-time session status detection, multi-session management, and compact tracki
 
 **English** | [日本語](README-ja.md)
 
+[![VS Code Marketplace](https://img.shields.io/visual-studio-marketplace/v/barrel1054.claude-code-vitals?label=Marketplace)](https://marketplace.visualstudio.com/items?itemName=barrel1054.claude-code-vitals)
+
 ![Screenshot](media/screenshot.png)
+
+## Install
+
+Search `Claude Code Vitals` in VS Code Extensions, or:
+
+```
+ext install barrel1054.claude-code-vitals
+```
 
 ## Requirements
 

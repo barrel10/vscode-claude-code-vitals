@@ -2,9 +2,19 @@
 
 [English](README.md) | **日本語**
 
+[![VS Code Marketplace](https://img.shields.io/visual-studio-marketplace/v/barrel1054.claude-code-vitals?label=Marketplace)](https://marketplace.visualstudio.com/items?itemName=barrel1054.claude-code-vitals)
+
 Claude Codeセッションのステータス・compact残量・トークン使用量をリアルタイム監視するVS Code拡張。
 
 ![スクリーンショット](media/screenshot.png)
+
+## インストール
+
+VS Code拡張機能で `Claude Code Vitals` を検索、または:
+
+```
+ext install barrel1054.claude-code-vitals
+```
 
 ## 必要条件
 
