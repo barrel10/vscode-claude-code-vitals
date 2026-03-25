@@ -402,7 +402,9 @@ function parseSessionJsonl(
           if (data.message?.stop_reason) { lastStopReason = data.message.stop_reason; }
         }
         if (data.sessionId && !sessionId) { sessionId = data.sessionId; }
-        if (data.type === 'ai-title' && data.aiTitle) {
+        if (data.type === 'custom-title' && data.customTitle) {
+          aiTitle = data.customTitle;
+        } else if (data.type === 'ai-title' && data.aiTitle) {
           aiTitle = data.aiTitle;
         }
         if (data.type === 'assistant' && data.message?.usage) {
