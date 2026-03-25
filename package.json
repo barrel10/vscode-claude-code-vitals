@@ -1,0 +1,337 @@
+{
+  "name": "claude-code-vitals",
+  "displayName": "Claude Code Vitals",
+  "description": "Real-time session status detection, multi-session management, and compact tracking for Claude Code",
+  "version": "1.0.0",
+  "publisher": "barrel1054",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/barrel10/vscode-claude-code-vitals"
+  },
+  "bugs": {
+    "url": "https://github.com/barrel10/vscode-claude-code-vitals/issues"
+  },
+  "homepage": "https://github.com/barrel10/vscode-claude-code-vitals#readme",
+  "keywords": [
+    "claude",
+    "anthropic",
+    "session",
+    "status",
+    "thinking",
+    "waiting",
+    "compact",
+    "context",
+    "multi-session",
+    "real-time",
+    "monitor"
+  ],
+  "icon": "media/icon.png",
+  "extensionDependencies": [
+    "anthropic.claude-code"
+  ],
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other",
+    "Visualization"
+  ],
+  "qna": false,
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "claudeCodeVitals",
+          "title": "Claude Code Vitals",
+          "icon": "media/claude-monitor.svg"
+        }
+      ]
+    },
+    "views": {
+      "claudeCodeVitals": [
+        {
+          "id": "claudeCodeVitalsSessionView",
+          "name": "Sessions",
+          "type": "webview"
+        },
+        {
+          "id": "claudeCodeVitalsOverviewView",
+          "name": "Overview"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "claude-code-vitals.refresh",
+        "title": "Refresh",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "claude-code-vitals.sortByTime",
+        "title": "Claude Code Vitals: Sort by Time"
+      },
+      {
+        "command": "claude-code-vitals.sortByUsage",
+        "title": "Claude Code Vitals: Sort by Usage"
+      },
+      {
+        "command": "claude-code-vitals.sortByCompact",
+        "title": "Claude Code Vitals: Sort by Compact Proximity"
+      },
+      {
+        "command": "claude-code-vitals.filterAll",
+        "title": "Claude Code Vitals: Show All"
+      },
+      {
+        "command": "claude-code-vitals.filterWarning",
+        "title": "Claude Code Vitals: Warning Only"
+      },
+      {
+        "command": "claude-code-vitals.filterCritical",
+        "title": "Claude Code Vitals: Critical Only"
+      },
+      {
+        "command": "claude-code-vitals.setupHooks",
+        "title": "Claude Code Vitals: Setup Hooks"
+      },
+      {
+        "command": "claude-code-vitals.removeHooks",
+        "title": "Claude Code Vitals: Remove Hooks"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "claude-code-vitals.refresh",
+          "when": "view == claudeCodeVitalsSessionView",
+          "group": "navigation"
+        },
+        {
+          "command": "claude-code-vitals.sortByTime",
+          "when": "view == claudeCodeVitalsSessionView",
+          "group": "1_sort@1"
+        },
+        {
+          "command": "claude-code-vitals.sortByUsage",
+          "when": "view == claudeCodeVitalsSessionView",
+          "group": "1_sort@2"
+        },
+        {
+          "command": "claude-code-vitals.sortByCompact",
+          "when": "view == claudeCodeVitalsSessionView",
+          "group": "1_sort@3"
+        },
+        {
+          "command": "claude-code-vitals.filterAll",
+          "when": "view == claudeCodeVitalsSessionView",
+          "group": "2_filter@1"
+        },
+        {
+          "command": "claude-code-vitals.filterWarning",
+          "when": "view == claudeCodeVitalsSessionView",
+          "group": "2_filter@2"
+        },
+        {
+          "command": "claude-code-vitals.filterCritical",
+          "when": "view == claudeCodeVitalsSessionView",
+          "group": "2_filter@3"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "%configuration.title%",
+      "properties": {
+        "claudeCodeVitals.enableHookDetection": {
+          "type": "boolean",
+          "default": false,
+          "order": 1,
+          "markdownDescription": "%configuration.enableHookDetection.description%"
+        },
+        "claudeCodeVitals.warningThreshold": {
+          "type": "number",
+          "default": 75,
+          "minimum": 0,
+          "maximum": 100,
+          "order": 2,
+          "description": "%configuration.warningThreshold.description%"
+        },
+        "claudeCodeVitals.criticalThreshold": {
+          "type": "number",
+          "default": 95,
+          "minimum": 0,
+          "maximum": 100,
+          "order": 3,
+          "description": "%configuration.criticalThreshold.description%"
+        },
+        "claudeCodeVitals.notificationLevel": {
+          "type": "string",
+          "default": "none",
+          "enum": [
+            "none",
+            "warning",
+            "critical"
+          ],
+          "enumDescriptions": [
+            "%configuration.notificationLevel.none%",
+            "%configuration.notificationLevel.warning%",
+            "%configuration.notificationLevel.critical%"
+          ],
+          "order": 4,
+          "description": "%configuration.notificationLevel.description%"
+        },
+        "claudeCodeVitals.pollInterval": {
+          "type": "number",
+          "default": 5,
+          "minimum": 1,
+          "maximum": 60,
+          "order": 5,
+          "description": "%configuration.pollInterval.description%"
+        },
+        "claudeCodeVitals.inactiveHours": {
+          "type": "number",
+          "default": 24,
+          "minimum": 1,
+          "order": 6,
+          "description": "%configuration.inactiveHours.description%"
+        },
+        "claudeCodeVitals.defaultSort": {
+          "type": "string",
+          "default": "time",
+          "enum": [
+            "time",
+            "usage",
+            "compact"
+          ],
+          "order": 7,
+          "description": "%configuration.defaultSort.description%"
+        },
+        "claudeCodeVitals.defaultFilter": {
+          "type": "string",
+          "default": "all",
+          "enum": [
+            "all",
+            "warning",
+            "critical"
+          ],
+          "order": 8,
+          "description": "%configuration.defaultFilter.description%"
+        },
+        "claudeCodeVitals.progressMode": {
+          "type": "string",
+          "default": "compact",
+          "enum": [
+            "compact",
+            "context"
+          ],
+          "enumDescriptions": [
+            "%configuration.progressMode.compact%",
+            "%configuration.progressMode.context%"
+          ],
+          "order": 9,
+          "description": "%configuration.progressMode.description%"
+        },
+        "claudeCodeVitals.cardDisplay": {
+          "type": "object",
+          "description": "%configuration.cardDisplay.description%",
+          "default": {
+            "sparkline": false,
+            "model": true,
+            "messages": true,
+            "compact": true,
+            "agents": true,
+            "cost": true
+          },
+          "order": 10,
+          "properties": {
+            "sparkline": {
+              "type": "boolean",
+              "description": "%configuration.cardDisplay.sparkline%"
+            },
+            "model": {
+              "type": "boolean",
+              "description": "%configuration.cardDisplay.model%"
+            },
+            "messages": {
+              "type": "boolean",
+              "description": "%configuration.cardDisplay.messages%"
+            },
+            "compact": {
+              "type": "boolean",
+              "description": "%configuration.cardDisplay.compact%"
+            },
+            "agents": {
+              "type": "boolean",
+              "description": "%configuration.cardDisplay.agents%"
+            },
+            "cost": {
+              "type": "boolean",
+              "description": "%configuration.cardDisplay.cost%"
+            }
+          },
+          "additionalProperties": false
+        },
+        "claudeCodeVitals.tooltipDisplay": {
+          "type": "object",
+          "description": "%configuration.tooltipDisplay.description%",
+          "default": {
+            "context": true,
+            "compact": true,
+            "messages": true,
+            "tokens": true,
+            "cost": true,
+            "compacts": true,
+            "agents": true
+          },
+          "order": 11,
+          "properties": {
+            "context": {
+              "type": "boolean",
+              "description": "%configuration.tooltipDisplay.context%"
+            },
+            "compact": {
+              "type": "boolean",
+              "description": "%configuration.tooltipDisplay.compact%"
+            },
+            "messages": {
+              "type": "boolean",
+              "description": "%configuration.tooltipDisplay.messages%"
+            },
+            "tokens": {
+              "type": "boolean",
+              "description": "%configuration.tooltipDisplay.tokens%"
+            },
+            "cost": {
+              "type": "boolean",
+              "description": "%configuration.tooltipDisplay.cost%"
+            },
+            "compacts": {
+              "type": "boolean",
+              "description": "%configuration.tooltipDisplay.compacts%"
+            },
+            "agents": {
+              "type": "boolean",
+              "description": "%configuration.tooltipDisplay.agents%"
+            }
+          },
+          "additionalProperties": false
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "npx @vscode/vsce package --no-dependencies"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.3.0"
+  }
+}
