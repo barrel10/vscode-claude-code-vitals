@@ -18,6 +18,7 @@ export interface Usage {
 export interface ClaudeSettings {
   maxTokensOverride: number | null;
   autocompactPct: number;
+  contextWindowOverride: number | null;
 }
 
 export type SessionStatus = 'thinking' | 'waiting' | 'idle' | 'inactive';
@@ -109,10 +110,13 @@ export interface SessionInfo {
   _agentTimestamps: number[];
   /** @internal tasks dir max mtime for activity detection */
   tasksMtimeMs: number;
+  /** @internal subagent dir max mtime for cache invalidation */
+  subagentMtimeMs: number;
 }
 
 export type SortMode = 'time' | 'usage' | 'compact';
 export type FilterMode = 'all' | 'warning' | 'critical';
+export type GroupMode = 'none' | 'project' | 'status' | 'custom';
 
 // ─── Constants ───
 
@@ -131,6 +135,7 @@ const SKIP_PREFIXES = [
 export function readClaudeSettings(): ClaudeSettings {
   let maxTokensOverride: number | null = null;
   let autocompactPct = 95;
+  let contextWindowOverride: number | null = null;
   try {
     const settings = JSON.parse(
       fs.readFileSync(path.join(os.homedir(), '.claude', 'settings.json'), 'utf8')
@@ -144,26 +149,66 @@ export function readClaudeSettings(): ClaudeSettings {
       if (!isNaN(n)) { autocompactPct = n; }
     }
   } catch { /* ignore */ }
-  return { maxTokensOverride, autocompactPct };
+
+  // Detect context window override from model settings and GrowthBook feature flag.
+  // Priority: settings.local.json model [1m] > settings.json model [1m] > GrowthBook flag
+  if (contextWindowOverride === null) {
+    const re1m = /[\[(]1[mM][\])]/;
+    const localSettingsPath = path.join(os.homedir(), '.claude', 'settings.local.json');
+    const settingsPath = path.join(os.homedir(), '.claude', 'settings.json');
+    try {
+      const local = JSON.parse(fs.readFileSync(localSettingsPath, 'utf8'));
+      if (typeof local?.model === 'string' && re1m.test(local.model)) {
+        contextWindowOverride = 1_000_000;
+      }
+    } catch { /* ignore */ }
+    if (contextWindowOverride === null) {
+      try {
+        const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+        if (typeof settings?.model === 'string' && re1m.test(settings.model)) {
+          contextWindowOverride = 1_000_000;
+        }
+      } catch { /* ignore */ }
+    }
+    if (contextWindowOverride === null) {
+      try {
+        const claudeJson = JSON.parse(
+          fs.readFileSync(path.join(os.homedir(), '.claude.json'), 'utf8')
+        );
+        const hw = claudeJson?.cachedGrowthBookFeatures?.tengu_hawthorn_window;
+        if (typeof hw === 'number' && hw > 0) {
+          contextWindowOverride = hw;
+        }
+      } catch { /* ignore */ }
+    }
+  }
+
+  return { maxTokensOverride, autocompactPct, contextWindowOverride };
 }
 
-// Built-in context limits by model ID and short alias.
+// Model info: base context size and whether the model supports extended (1M) context.
+// The base context is the default without [1m] suffix; extended context requires
+// the [1m] suffix which triggers the API beta header context-1m-2025-08-07.
 // Aliases (opus/sonnet/haiku) map to the current default version.
-// Update aliases when Anthropic changes the default model version.
-// (2026-03-19 verified against docs.anthropic.com)
-const CONTEXT_LIMITS: Record<string, number> = {
-  'claude-opus-4-6': 1_000_000,
-  'claude-sonnet-4-6': 1_000_000,
-  'claude-opus-4-5': 200_000,
-  'claude-opus-4-1': 200_000,
-  'claude-opus-4': 200_000,
-  'claude-sonnet-4-5': 200_000,
-  'claude-sonnet-4': 200_000,
-  'claude-haiku-4-5': 200_000,
+// (2026-03-29 verified against docs.anthropic.com)
+interface ModelInfo {
+  contextSize: number;
+  supportsExtended: boolean;
+}
+
+const MODEL_INFO: Record<string, ModelInfo> = {
+  'claude-opus-4-6':   { contextSize: 200_000, supportsExtended: true },
+  'claude-sonnet-4-6': { contextSize: 200_000, supportsExtended: true },
+  'claude-opus-4-5':   { contextSize: 200_000, supportsExtended: false },
+  'claude-opus-4-1':   { contextSize: 200_000, supportsExtended: false },
+  'claude-opus-4':     { contextSize: 200_000, supportsExtended: false },
+  'claude-sonnet-4-5': { contextSize: 200_000, supportsExtended: false },
+  'claude-sonnet-4':   { contextSize: 200_000, supportsExtended: false },
+  'claude-haiku-4-5':  { contextSize: 200_000, supportsExtended: false },
   // Short aliases → current default version
-  'opus': 1_000_000,
-  'sonnet': 1_000_000,
-  'haiku': 200_000,
+  'opus':   { contextSize: 200_000, supportsExtended: true },
+  'sonnet': { contextSize: 200_000, supportsExtended: true },
+  'haiku':  { contextSize: 200_000, supportsExtended: false },
 };
 
 // API pricing per million tokens (2026-03-24 verified against docs.anthropic.com)
@@ -186,8 +231,15 @@ function normalizeModelId(model: string): string {
 }
 
 export function getContextMaxForModel(model: string): number {
+  // If model explicitly has [1m] suffix, return 1M (future-proofing)
+  if (/[\[(]1[mM][\])]$/.test(model)) { return 1_000_000; }
   const normalized = normalizeModelId(model);
-  return CONTEXT_LIMITS[normalized] ?? DEFAULT_CONTEXT_SIZE;
+  return MODEL_INFO[normalized]?.contextSize ?? DEFAULT_CONTEXT_SIZE;
+}
+
+export function isExtendedContextModel(model: string): boolean {
+  const normalized = normalizeModelId(model);
+  return MODEL_INFO[normalized]?.supportsExtended ?? false;
 }
 
 export function formatTokens(n: number): string {
@@ -296,7 +348,20 @@ function getSessionStatus(effectiveMtimeMs: number, jsonlMtimeMs: number, isActi
   return 'idle';
 }
 
-// ─── Subagent mtime ───
+// ��── Subagent parsing ───
+
+interface SubagentSummary {
+  maxMtimeMs: number;
+  count: number;
+  timestamps: number[];
+  input: number;
+  cacheRead: number;
+  cacheCreation: number;
+  output: number;
+  cacheWrite5m: number;
+  cacheWrite1h: number;
+  cacheWriteNoBreakdown: number;
+}
 
 function getSubagentMaxMtime(sessionFilePath: string): number {
   try {
@@ -312,6 +377,53 @@ function getSubagentMaxMtime(sessionFilePath: string): number {
     }
     return maxMtime;
   } catch { return 0; }
+}
+
+/** Parse subagent JSONL files for usage accumulation and agent tracking.
+ *  Since Claude Code ~2.1.89, agent_progress entries are no longer written to the main JSONL.
+ *  Agent data is now in separate subagent JSONL files under {sessionDir}/{sessionId}/subagents/. */
+function parseSubagentUsage(sessionFilePath: string): SubagentSummary {
+  const result: SubagentSummary = {
+    maxMtimeMs: 0, count: 0, timestamps: [],
+    input: 0, cacheRead: 0, cacheCreation: 0, output: 0,
+    cacheWrite5m: 0, cacheWrite1h: 0, cacheWriteNoBreakdown: 0,
+  };
+  try {
+    const sessionId = path.basename(sessionFilePath, '.jsonl');
+    const subagentDir = path.join(path.dirname(sessionFilePath), sessionId, 'subagents');
+    for (const file of fs.readdirSync(subagentDir)) {
+      if (!file.endsWith('.jsonl')) { continue; }
+      const fp = path.join(subagentDir, file);
+      try {
+        const stat = fs.statSync(fp);
+        if (stat.mtimeMs > result.maxMtimeMs) { result.maxMtimeMs = stat.mtimeMs; }
+        result.count++;
+        result.timestamps.push(stat.mtimeMs);
+        for (const line of fs.readFileSync(fp, 'utf8').trim().split('\n')) {
+          if (!line.trim()) { continue; }
+          try {
+            const data = JSON.parse(line);
+            if (data.type === 'assistant' && data.message?.usage) {
+              const u = data.message.usage;
+              result.input += u.input_tokens || 0;
+              result.cacheRead += u.cache_read_input_tokens || 0;
+              result.cacheCreation += u.cache_creation_input_tokens || 0;
+              result.output += u.output_tokens || 0;
+              const e5m = u.cache_creation?.ephemeral_5m_input_tokens || 0;
+              const e1h = u.cache_creation?.ephemeral_1h_input_tokens || 0;
+              if (e5m > 0 || e1h > 0) {
+                result.cacheWrite5m += e5m;
+                result.cacheWrite1h += e1h;
+              } else {
+                result.cacheWriteNoBreakdown += u.cache_creation_input_tokens || 0;
+              }
+            }
+          } catch { /* skip line */ }
+        }
+      } catch { /* skip file */ }
+    }
+  } catch { /* no subagent dir */ }
+  return result;
 }
 
 // ─── Tasks dir mtime ───
@@ -445,12 +557,11 @@ function parseSessionJsonl(
           lastCompactFreed = data.compactMetadata?.preTokens || 0;
           compactBoundaryPending = true; // suppress next heuristic drop
         }
-        // Agent activity detection
+        // Agent activity detection (legacy: progress entries in main JSONL, pre ~2.1.89)
         if (data.type === 'progress' && data.data?.type === 'agent_progress' && data.data?.agentId) {
           agentIds.add(data.data.agentId);
           const ts = new Date(data.timestamp || 0).getTime();
           agentLastSeen.set(data.data.agentId, ts);
-          // Accumulate agent tokens for cost calculation
           const agentUsage = data.data?.message?.message?.usage;
           if (agentUsage) {
             totalInput += agentUsage.input_tokens || 0;
@@ -481,11 +592,31 @@ function parseSessionJsonl(
 
     if (!lastUsage) { return null; }
 
+    // Subagent usage: parse subagent JSONL files directly (new format, ~2.1.89+)
+    // Falls back gracefully if no subagent dir exists or if legacy progress entries were found
+    const subagent = parseSubagentUsage(filePath);
+    if (agentIds.size === 0 && subagent.count > 0) {
+      // New format: no progress entries in main JSONL, agent data in subagent files
+      totalInput += subagent.input;
+      totalCacheRead += subagent.cacheRead;
+      totalCacheCreation += subagent.cacheCreation;
+      totalOutput += subagent.output;
+      totalCacheWrite5m += subagent.cacheWrite5m;
+      totalCacheWrite1h += subagent.cacheWrite1h;
+      totalCacheWriteNoBreakdown += subagent.cacheWriteNoBreakdown;
+    }
+    const totalAgentCount = agentIds.size > 0 ? agentIds.size : subagent.count;
+    const agentTimestamps = agentIds.size > 0 ? [...agentLastSeen.values()] : subagent.timestamps;
+
     const inputTokens = lastUsage.input_tokens || 0;
     const cacheReadTokens = lastUsage.cache_read_input_tokens || 0;
     const cacheCreationTokens = lastUsage.cache_creation_input_tokens || 0;
     const contextUsed = inputTokens + cacheCreationTokens + cacheReadTokens;
-    const contextMax = settings.maxTokensOverride ?? getContextMaxForModel(lastModel);
+    const explicit1m = /[\[(]1[mM][\])]$/.test(lastModel) ? 1_000_000 : null;
+    const contextMax = settings.maxTokensOverride
+      ?? explicit1m
+      ?? (isExtendedContextModel(lastModel) ? settings.contextWindowOverride : null)
+      ?? getContextMaxForModel(lastModel);
     const compactThreshold = Math.max(1, Math.floor(contextMax * settings.autocompactPct / 100));
     const usagePercent = (contextUsed / compactThreshold) * 100;
     const tokensUntilCompact = Math.max(0, compactThreshold - contextUsed);
@@ -497,7 +628,6 @@ function parseSessionJsonl(
           : (sessionId ? sessionId.substring(0, 8) : path.basename(filePath, '.jsonl').substring(0, 8))
       );
 
-    const agentTimestamps = [...agentLastSeen.values()];
     let activeAgentCount = 0;
     const now = Date.now();
     for (const ts of agentTimestamps) {
@@ -505,7 +635,7 @@ function parseSessionJsonl(
     }
 
     const tasksMtime = getTasksMaxMtime(projectDir, sessionId);
-    const effectiveMtime = Math.max(mtimeMs, getSubagentMaxMtime(filePath), tasksMtime);
+    const effectiveMtime = Math.max(mtimeMs, subagent.maxMtimeMs, tasksMtime);
     return {
       sessionId, sessionName, model: lastModel,
       contextUsed, contextMax, usagePercent,
@@ -519,8 +649,9 @@ function parseSessionJsonl(
       cacheCreationTokens: totalCacheCreation, outputTokens: totalOutput,
       totalCacheWrite5m, totalCacheWrite1h, totalCacheWriteNoBreakdown,
       compactCount, compactAutoCount, compactManualCount, lastCompactFreed,
-      activeAgentCount, totalAgentCount: agentIds.size, _agentTimestamps: agentTimestamps,
+      activeAgentCount, totalAgentCount, _agentTimestamps: agentTimestamps,
       tasksMtimeMs: tasksMtime,
+      subagentMtimeMs: subagent.maxMtimeMs,
     };
   } catch { return null; }
 }
@@ -561,7 +692,8 @@ export function findAllSessionsCached(
           // Effective mtime includes subagent and tasks dir activity
           const sessionId = path.basename(file, '.jsonl');
           const tasksMtime = getTasksMaxMtime(projectDir, sessionId);
-          const effectiveMtime = Math.max(mtime, getSubagentMaxMtime(filePath), tasksMtime);
+          const subagentMtime = getSubagentMaxMtime(filePath);
+          const effectiveMtime = Math.max(mtime, subagentMtime, tasksMtime);
 
           if (now - effectiveMtime > inactiveMs && !keepSessionIds.has(sessionId)) {
             sessionCache.delete(filePath);
@@ -570,7 +702,8 @@ export function findAllSessionsCached(
           seenPaths.add(filePath);
 
           const cached = sessionCache.get(filePath);
-          if (cached && cached.mtimeMs === mtime && cached.fileSize === size) {
+          const subagentChanged = cached ? subagentMtime !== cached.subagentMtimeMs : false;
+          if (cached && cached.mtimeMs === mtime && cached.fileSize === size && !subagentChanged) {
             const activityChanged = tasksMtime !== cached.tasksMtimeMs;
             cached.tasksMtimeMs = tasksMtime;
             cached.status = getSessionStatus(effectiveMtime, mtime, cached.isActiveTurn, activityChanged, cached.sessionId);

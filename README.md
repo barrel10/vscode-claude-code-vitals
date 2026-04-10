@@ -6,7 +6,7 @@ Real-time session status detection, multi-session management, and compact tracki
 
 [![VS Code Marketplace](https://img.shields.io/visual-studio-marketplace/v/barrel1054.claude-code-vitals?label=Marketplace)](https://marketplace.visualstudio.com/items?itemName=barrel1054.claude-code-vitals)
 
-![Screenshot](media/screenshot.png)
+![Screenshot](https://raw.githubusercontent.com/barrel10/vscode-claude-code-vitals/main/media/screenshot.png)
 
 ## Install
 

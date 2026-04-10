@@ -28,6 +28,7 @@ const USAGE_URL = 'https://api.anthropic.com/api/oauth/usage';
 const OAUTH_BETA = 'oauth-2025-04-20';
 const MIN_FETCH_INTERVAL_MS = 60_000;
 const BACKOFF_MS = 300_000;
+const TOKEN_EXPIRY_MARGIN_MS = 300_000; // 5min margin, same as Claude Code
 
 // ─── State ───
 
@@ -35,16 +36,21 @@ let cached: RateLimitInfo | null = null;
 let lastFetchMs = 0;
 let backoffUntil = 0;
 let inFlight: Promise<RateLimitInfo | null> | null = null;
+let lastCredMtimeMs = 0;
+let lastAccessToken = '';
+let credWatcher: fs.FSWatcher | null = null;
 
 // ─── Helpers ───
 
-// Read-only access to credentials. Never write back.
-// Token refresh is Claude Code's responsibility — we just read and retry on failure.
-function readAccessToken(): string | null {
+function readCredentials(): Credentials | null {
   try {
-    const cred: Credentials = JSON.parse(fs.readFileSync(CRED_PATH, 'utf8'));
-    return cred?.claudeAiOauth?.accessToken || null;
+    return JSON.parse(fs.readFileSync(CRED_PATH, 'utf8'));
   } catch { return null; }
+}
+
+function isTokenExpired(expiresAt: number | undefined): boolean {
+  if (!expiresAt) { return false; } // unknown expiry → try anyway
+  return Date.now() + TOKEN_EXPIRY_MARGIN_MS >= expiresAt;
 }
 
 function httpsRequest(url: string, options: https.RequestOptions): Promise<string> {
@@ -84,6 +90,55 @@ async function fetchUsage(token: string): Promise<RateLimitInfo> {
   };
 }
 
+// ─── Credentials watch ───
+
+let onCredentialsRefreshed: (() => void) | null = null;
+
+/** Start watching .credentials.json for changes.
+ *  When Claude Code refreshes the token, we detect the new file and clear backoff. */
+export function startCredentialsWatch(onRefreshed?: () => void): void {
+  if (credWatcher) { return; }
+  if (onRefreshed) { onCredentialsRefreshed = onRefreshed; }
+
+  // Record initial state
+  const cred = readCredentials();
+  lastAccessToken = cred?.claudeAiOauth?.accessToken || '';
+  try { lastCredMtimeMs = fs.statSync(CRED_PATH).mtimeMs; } catch { /* ignore */ }
+
+  // Try watching the file directly; fall back to parent dir if file doesn't exist yet
+  try {
+    credWatcher = fs.watch(CRED_PATH, () => { onCredentialsChanged(); });
+  } catch {
+    try {
+      const credDir = path.dirname(CRED_PATH);
+      credWatcher = fs.watch(credDir, (_: string, filename: string | null) => {
+        if (filename === path.basename(CRED_PATH)) { onCredentialsChanged(); }
+      });
+    } catch { /* ~/.claude doesn't exist */ }
+  }
+}
+
+export function stopCredentialsWatch(): void {
+  if (credWatcher) { credWatcher.close(); credWatcher = null; }
+}
+
+function onCredentialsChanged(): void {
+  try {
+    const stat = fs.statSync(CRED_PATH);
+    if (stat.mtimeMs === lastCredMtimeMs) { return; }
+    lastCredMtimeMs = stat.mtimeMs;
+
+    const cred = readCredentials();
+    const newToken = cred?.claudeAiOauth?.accessToken || '';
+    if (newToken && newToken !== lastAccessToken) {
+      // Claude Code refreshed the token — clear backoff and notify
+      lastAccessToken = newToken;
+      backoffUntil = 0;
+      if (onCredentialsRefreshed) { onCredentialsRefreshed(); }
+    }
+  } catch { /* ignore */ }
+}
+
 // ─── Public API ───
 
 export function getCachedRateLimits(): RateLimitInfo | null {
@@ -100,17 +155,25 @@ export async function fetchRateLimits(): Promise<RateLimitInfo | null> {
   if (now - lastFetchMs < MIN_FETCH_INTERVAL_MS) { return cached; }
   if (now < backoffUntil) { return cached; }
 
-  lastFetchMs = now;
-
-  const token = readAccessToken();
+  const cred = readCredentials();
+  const oauth = cred?.claudeAiOauth;
+  const token = oauth?.accessToken;
   if (!token) { return cached; }
+
+  // Skip API call if token is expired or expiring soon — wait for Claude Code to refresh
+  if (isTokenExpired(oauth?.expiresAt)) { return cached; }
+
+  // Track token for change detection
+  if (token !== lastAccessToken) { lastAccessToken = token; }
+
+  // Update lastFetchMs only when actually starting a fetch
+  lastFetchMs = now;
 
   inFlight = fetchUsage(token).then(info => {
     cached = info;
     inFlight = null;
     return info;
   }).catch(() => {
-    // Token expired or invalid — backoff and wait for Claude Code to refresh it
     backoffUntil = Date.now() + BACKOFF_MS;
     inFlight = null;
     return cached;

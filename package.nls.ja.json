@@ -8,7 +8,7 @@
   "configuration.notificationLevel.warning": "警告閾値で通知",
   "configuration.notificationLevel.critical": "危険閾値で通知",
   "configuration.inactiveHours.description": "指定時間以上非アクティブなセッションを非表示にする（時間）",
-  "configuration.enableHookDetection.description": "フックによるセッション状態検出（thinking/waiting/idle）を有効にする。有効化時にClaude Codeフックを自動設定、無効化時に自動削除。PATHにNode.jsが必要。",
+  "configuration.enableHookDetection.description": "フックによるセッション状態検出（thinking/waiting/idle）を有効にする。  \n有効化すると:  \n- `~/.claude/settings.local.json` にフックエントリを書き込み  \n- `~/.claude/hooks/` にNode.jsスクリプトをコピー  \n\n無効化時に**自動削除**されます。  \nPATHに **Node.js** が必要です。切り替え後、新しいClaude Codeセッションで反映されます。",
   "configuration.progressMode.description": "プログレスバーと%の表示基準",
   "configuration.progressMode.compact": "次回compact閾値への進捗（contextUsed / compact閾値）",
   "configuration.progressMode.context": "コンテキストウィンドウ全体の使用率（contextUsed / contextMax）",
@@ -28,5 +28,10 @@
   "configuration.tooltipDisplay.tokens": "トークン内訳（入力 / 出力 / キャッシュ）",
   "configuration.tooltipDisplay.cost": "コスト概算",
   "configuration.tooltipDisplay.compacts": "compactイベント回数",
-  "configuration.tooltipDisplay.agents": "エージェント数"
+  "configuration.tooltipDisplay.agents": "エージェント数",
+  "configuration.defaultGroup.description": "セッション一覧のデフォルトグループモード",
+  "configuration.defaultGroup.none": "グループなし（フラットリスト）",
+  "configuration.defaultGroup.project": "プロジェクト/フォルダ別",
+  "configuration.defaultGroup.status": "ステータス別（thinking/waiting/idle/inactive）",
+  "configuration.defaultGroup.custom": "カスタムグループ（ユーザー定義）"
 }

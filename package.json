@@ -2,7 +2,7 @@
   "name": "claude-code-vitals",
   "displayName": "Claude Code Vitals",
   "description": "Real-time session status detection, multi-session management, and compact tracking for Claude Code",
-  "version": "1.0.2",
+  "version": "1.2.3",
   "publisher": "barrel1054",
   "license": "MIT",
   "repository": {
@@ -13,34 +13,15 @@
     "url": "https://github.com/barrel10/vscode-claude-code-vitals/issues"
   },
   "homepage": "https://github.com/barrel10/vscode-claude-code-vitals#readme",
-  "keywords": [
-    "claude",
-    "anthropic",
-    "session",
-    "status",
-    "thinking",
-    "waiting",
-    "compact",
-    "context",
-    "multi-session",
-    "real-time",
-    "monitor"
-  ],
+  "keywords": ["claude", "anthropic", "session", "status", "thinking", "waiting", "compact", "context", "multi-session", "real-time", "monitor"],
   "icon": "media/icon.png",
-  "extensionDependencies": [
-    "anthropic.claude-code"
-  ],
+  "extensionDependencies": ["anthropic.claude-code"],
   "engines": {
     "vscode": "^1.85.0"
   },
-  "categories": [
-    "Other",
-    "Visualization"
-  ],
+  "categories": ["Other", "Visualization"],
   "qna": false,
-  "activationEvents": [
-    "onStartupFinished"
-  ],
+  "activationEvents": ["onStartupFinished"],
   "main": "./out/extension.js",
   "contributes": {
     "viewsContainers": {
@@ -96,6 +77,30 @@
         "title": "Claude Code Vitals: Critical Only"
       },
       {
+        "command": "claude-code-vitals.toggleShowHidden",
+        "title": "Claude Code Vitals: Toggle Hidden Sessions"
+      },
+      {
+        "command": "claude-code-vitals.groupNone",
+        "title": "Claude Code Vitals: No Grouping"
+      },
+      {
+        "command": "claude-code-vitals.groupByProject",
+        "title": "Claude Code Vitals: Group by Project"
+      },
+      {
+        "command": "claude-code-vitals.groupByStatus",
+        "title": "Claude Code Vitals: Group by Status"
+      },
+      {
+        "command": "claude-code-vitals.groupByCustom",
+        "title": "Claude Code Vitals: Group by Custom"
+      },
+      {
+        "command": "claude-code-vitals.manageGroups",
+        "title": "Claude Code Vitals: Manage Custom Groups"
+      },
+      {
         "command": "claude-code-vitals.setupHooks",
         "title": "Claude Code Vitals: Setup Hooks"
       },
@@ -140,6 +145,36 @@
           "command": "claude-code-vitals.filterCritical",
           "when": "view == claudeCodeVitalsSessionView",
           "group": "2_filter@3"
+        },
+        {
+          "command": "claude-code-vitals.toggleShowHidden",
+          "when": "view == claudeCodeVitalsSessionView",
+          "group": "3_visibility@1"
+        },
+        {
+          "command": "claude-code-vitals.groupNone",
+          "when": "view == claudeCodeVitalsSessionView",
+          "group": "4_group@1"
+        },
+        {
+          "command": "claude-code-vitals.groupByProject",
+          "when": "view == claudeCodeVitalsSessionView",
+          "group": "4_group@2"
+        },
+        {
+          "command": "claude-code-vitals.groupByStatus",
+          "when": "view == claudeCodeVitalsSessionView",
+          "group": "4_group@3"
+        },
+        {
+          "command": "claude-code-vitals.groupByCustom",
+          "when": "view == claudeCodeVitalsSessionView",
+          "group": "4_group@4"
+        },
+        {
+          "command": "claude-code-vitals.manageGroups",
+          "when": "view == claudeCodeVitalsSessionView",
+          "group": "4_group@5"
         }
       ]
     },
@@ -171,11 +206,7 @@
         "claudeCodeVitals.notificationLevel": {
           "type": "string",
           "default": "none",
-          "enum": [
-            "none",
-            "warning",
-            "critical"
-          ],
+          "enum": ["none", "warning", "critical"],
           "enumDescriptions": [
             "%configuration.notificationLevel.none%",
             "%configuration.notificationLevel.warning%",
@@ -202,32 +233,34 @@
         "claudeCodeVitals.defaultSort": {
           "type": "string",
           "default": "time",
-          "enum": [
-            "time",
-            "usage",
-            "compact"
-          ],
+          "enum": ["time", "usage", "compact"],
           "order": 7,
           "description": "%configuration.defaultSort.description%"
         },
         "claudeCodeVitals.defaultFilter": {
           "type": "string",
           "default": "all",
-          "enum": [
-            "all",
-            "warning",
-            "critical"
-          ],
+          "enum": ["all", "warning", "critical"],
           "order": 8,
           "description": "%configuration.defaultFilter.description%"
+        },
+        "claudeCodeVitals.defaultGroup": {
+          "type": "string",
+          "default": "none",
+          "enum": ["none", "project", "status", "custom"],
+          "enumDescriptions": [
+            "%configuration.defaultGroup.none%",
+            "%configuration.defaultGroup.project%",
+            "%configuration.defaultGroup.status%",
+            "%configuration.defaultGroup.custom%"
+          ],
+          "order": 12,
+          "description": "%configuration.defaultGroup.description%"
         },
         "claudeCodeVitals.progressMode": {
           "type": "string",
           "default": "compact",
-          "enum": [
-            "compact",
-            "context"
-          ],
+          "enum": ["compact", "context"],
           "enumDescriptions": [
             "%configuration.progressMode.compact%",
             "%configuration.progressMode.context%"
@@ -248,30 +281,12 @@
           },
           "order": 10,
           "properties": {
-            "sparkline": {
-              "type": "boolean",
-              "description": "%configuration.cardDisplay.sparkline%"
-            },
-            "model": {
-              "type": "boolean",
-              "description": "%configuration.cardDisplay.model%"
-            },
-            "messages": {
-              "type": "boolean",
-              "description": "%configuration.cardDisplay.messages%"
-            },
-            "compact": {
-              "type": "boolean",
-              "description": "%configuration.cardDisplay.compact%"
-            },
-            "agents": {
-              "type": "boolean",
-              "description": "%configuration.cardDisplay.agents%"
-            },
-            "cost": {
-              "type": "boolean",
-              "description": "%configuration.cardDisplay.cost%"
-            }
+            "sparkline": { "type": "boolean", "description": "%configuration.cardDisplay.sparkline%" },
+            "model": { "type": "boolean", "description": "%configuration.cardDisplay.model%" },
+            "messages": { "type": "boolean", "description": "%configuration.cardDisplay.messages%" },
+            "compact": { "type": "boolean", "description": "%configuration.cardDisplay.compact%" },
+            "agents": { "type": "boolean", "description": "%configuration.cardDisplay.agents%" },
+            "cost": { "type": "boolean", "description": "%configuration.cardDisplay.cost%" }
           },
           "additionalProperties": false
         },
@@ -289,34 +304,13 @@
           },
           "order": 11,
           "properties": {
-            "context": {
-              "type": "boolean",
-              "description": "%configuration.tooltipDisplay.context%"
-            },
-            "compact": {
-              "type": "boolean",
-              "description": "%configuration.tooltipDisplay.compact%"
-            },
-            "messages": {
-              "type": "boolean",
-              "description": "%configuration.tooltipDisplay.messages%"
-            },
-            "tokens": {
-              "type": "boolean",
-              "description": "%configuration.tooltipDisplay.tokens%"
-            },
-            "cost": {
-              "type": "boolean",
-              "description": "%configuration.tooltipDisplay.cost%"
-            },
-            "compacts": {
-              "type": "boolean",
-              "description": "%configuration.tooltipDisplay.compacts%"
-            },
-            "agents": {
-              "type": "boolean",
-              "description": "%configuration.tooltipDisplay.agents%"
-            }
+            "context": { "type": "boolean", "description": "%configuration.tooltipDisplay.context%" },
+            "compact": { "type": "boolean", "description": "%configuration.tooltipDisplay.compact%" },
+            "messages": { "type": "boolean", "description": "%configuration.tooltipDisplay.messages%" },
+            "tokens": { "type": "boolean", "description": "%configuration.tooltipDisplay.tokens%" },
+            "cost": { "type": "boolean", "description": "%configuration.tooltipDisplay.cost%" },
+            "compacts": { "type": "boolean", "description": "%configuration.tooltipDisplay.compacts%" },
+            "agents": { "type": "boolean", "description": "%configuration.tooltipDisplay.agents%" }
           },
           "additionalProperties": false
         }

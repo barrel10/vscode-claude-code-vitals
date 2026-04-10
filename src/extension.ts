@@ -5,10 +5,10 @@ import * as os from 'os';
 
 import {
   readClaudeSettings, findAllSessionsCached, clearSessionCache,
-  ClaudeSettings, getMonitorDir, SortMode, FilterMode,
+  ClaudeSettings, getMonitorDir, SortMode, FilterMode, GroupMode,
 } from './sessions';
 import { SessionWebviewProvider, OverviewTreeProvider } from './views';
-import { fetchRateLimits } from './ratelimit';
+import { fetchRateLimits, startCredentialsWatch, stopCredentialsWatch } from './ratelimit';
 
 // ─── Constants ───
 
@@ -61,7 +61,7 @@ export function activate(context: vscode.ExtensionContext) {
 
   let watchers = new Map<string, fs.FSWatcher>();
   let lastMtimes = new Map<string, number>();
-  let lastSettings: ClaudeSettings = { maxTokensOverride: null, autocompactPct: 0 };
+  let lastSettings: ClaudeSettings = { maxTokensOverride: null, autocompactPct: 0, contextWindowOverride: null };
   let lastWarnThreshold = -1;
   let lastCritThreshold = -1;
   let lastInactiveHours = -1;
@@ -93,7 +93,8 @@ export function activate(context: vscode.ExtensionContext) {
     // Detect changes — clear cache before loading if settings changed
     const settingsChanged =
       settings.maxTokensOverride !== lastSettings.maxTokensOverride ||
-      settings.autocompactPct !== lastSettings.autocompactPct;
+      settings.autocompactPct !== lastSettings.autocompactPct ||
+      settings.contextWindowOverride !== lastSettings.contextWindowOverride;
     const progressMode = config.get<string>('progressMode', 'compact') as 'compact' | 'context';
     const cardDisplayObj = config.get<Record<string, boolean>>('cardDisplay', {});
     const tooltipDisplayObj = config.get<Record<string, boolean>>('tooltipDisplay', {});
@@ -119,7 +120,7 @@ export function activate(context: vscode.ExtensionContext) {
     let dataChanged = settingsChanged || configChanged || sessions.length !== lastMtimes.size;
     if (!dataChanged) {
       for (const s of sessions) {
-        if (lastMtimes.get(s.filePath) !== s.mtimeMs) { dataChanged = true; break; }
+        if (lastMtimes.get(s.filePath) !== s.displayMtimeMs) { dataChanged = true; break; }
       }
     }
 
@@ -138,7 +139,7 @@ export function activate(context: vscode.ExtensionContext) {
     }
 
     if (dataChanged) {
-      lastMtimes = new Map(sessions.map(s => [s.filePath, s.mtimeMs]));
+      lastMtimes = new Map(sessions.map(s => [s.filePath, s.displayMtimeMs]));
       lastSettings = settings;
       lastWarnThreshold = warnThreshold;
       lastCritThreshold = critThreshold;
@@ -209,8 +210,10 @@ export function activate(context: vscode.ExtensionContext) {
     const cfg = vscode.workspace.getConfiguration('claudeCodeVitals');
     const defaultSort = cfg.get<SortMode>('defaultSort', 'time');
     const defaultFilter = cfg.get<FilterMode>('defaultFilter', 'all');
+    const defaultGroup = cfg.get<GroupMode>('defaultGroup', 'none');
     if (defaultSort !== 'time') { sessionProvider.setSortMode(defaultSort); }
     if (defaultFilter !== 'all') { sessionProvider.setFilterMode(defaultFilter); }
+    if (defaultGroup !== 'none') { sessionProvider.setGroupMode(defaultGroup); }
   }
 
   // Commands
@@ -222,6 +225,12 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand('claude-code-vitals.filterAll', () => sessionProvider.setFilterMode('all')),
     vscode.commands.registerCommand('claude-code-vitals.filterWarning', () => sessionProvider.setFilterMode('warning')),
     vscode.commands.registerCommand('claude-code-vitals.filterCritical', () => sessionProvider.setFilterMode('critical')),
+    vscode.commands.registerCommand('claude-code-vitals.toggleShowHidden', () => sessionProvider.toggleShowHidden()),
+    vscode.commands.registerCommand('claude-code-vitals.groupNone', () => sessionProvider.setGroupMode('none')),
+    vscode.commands.registerCommand('claude-code-vitals.groupByProject', () => sessionProvider.setGroupMode('project')),
+    vscode.commands.registerCommand('claude-code-vitals.groupByStatus', () => sessionProvider.setGroupMode('status')),
+    vscode.commands.registerCommand('claude-code-vitals.groupByCustom', () => sessionProvider.setGroupMode('custom')),
+    vscode.commands.registerCommand('claude-code-vitals.manageGroups', () => sessionProvider.manageCustomGroups()),
     vscode.commands.registerCommand('claude-code-vitals.setupHooks', () => setupHooks(context)),
     vscode.commands.registerCommand('claude-code-vitals.removeHooks', () => removeHooks()),
   );
@@ -299,6 +308,8 @@ export function activate(context: vscode.ExtensionContext) {
   {
     const cfg = vscode.workspace.getConfiguration('claudeCodeVitals');
     const wantHooks = cfg.get<boolean>('enableHookDetection', false);
+    // Always clean stale entries from settings.json on activation
+    cleanGlobalSettingsHooks();
     const settings = readClaudeSettingsJson();
     const hasHooks = isHookInstalled(settings);
     if (wantHooks && !hasHooks) {
@@ -309,6 +320,7 @@ export function activate(context: vscode.ExtensionContext) {
   }
 
   // Start
+  startCredentialsWatch(scheduleRefresh);
   refresh();
   pollTimer = setInterval(scheduleRefresh, getPollIntervalMs());
 
@@ -318,6 +330,7 @@ export function activate(context: vscode.ExtensionContext) {
       if (debounceTimer) { clearTimeout(debounceTimer); }
       for (const w of watchers.values()) { w.close(); }
       for (const dw of dirWatchers) { dw.close(); }
+      stopCredentialsWatch();
       sessionProvider.dispose();
     },
   });
@@ -343,7 +356,9 @@ const ALL_OWNED_EVENTS = [
 interface HookEntry { _id?: string; hooks: { type: string; command: string }[] }
 interface HooksConfig { [event: string]: HookEntry[] }
 
-function isOurEntry(entry: HookEntry): boolean { return entry._id === HOOK_ID || LEGACY_HOOK_IDS.includes(entry._id ?? ''); }
+function isOurEntry(entry: HookEntry): boolean {
+  return entry._id === HOOK_ID || (entry._id !== undefined && LEGACY_HOOK_IDS.includes(entry._id));
+}
 function filterOurEntries(entries: HookEntry[]): HookEntry[] { return entries.filter(e => !isOurEntry(e)); }
 
 function getClaudeLocalSettingsPath(): string {
@@ -362,6 +377,10 @@ function getClaudeHooksDir(): string {
   return path.join(getClaudeDir(), 'hooks');
 }
 
+function getClaudeGlobalSettingsPath(): string {
+  return path.join(os.homedir(), '.claude', 'settings.json');
+}
+
 function readClaudeSettingsJson(): Record<string, unknown> {
   const p = getClaudeLocalSettingsPath();
   try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch { return {}; }
@@ -375,10 +394,37 @@ function writeClaudeSettingsJson(obj: Record<string, unknown>): void {
   fs.writeFileSync(p, JSON.stringify(obj, null, 2) + '\n', 'utf8');
 }
 
+/** Remove our hook entries and resulting empty arrays from settings.json (global).
+ *  Empty arrays for managed events in settings.json can override settings.local.json hooks. */
+function cleanGlobalSettingsHooks(): void {
+  const globalPath = getClaudeGlobalSettingsPath();
+  let globalSettings: Record<string, unknown>;
+  try { globalSettings = JSON.parse(fs.readFileSync(globalPath, 'utf8')); } catch { return; }
+  const hooks = globalSettings.hooks as HooksConfig | undefined;
+  if (!hooks) { return; }
+
+  let changed = false;
+  for (const event of ALL_OWNED_EVENTS) {
+    if (!(event in hooks)) { continue; }
+    const cleaned = filterOurEntries(hooks[event] || []);
+    if (cleaned.length === 0) {
+      delete hooks[event];
+      changed = true;
+    } else if (cleaned.length !== (hooks[event]?.length ?? 0)) {
+      hooks[event] = cleaned;
+      changed = true;
+    }
+  }
+  if (changed) {
+    try { fs.writeFileSync(globalPath, JSON.stringify(globalSettings, null, 2) + '\n', 'utf8'); }
+    catch (e) { log(`Failed to clean global settings hooks: ${e}`); }
+  }
+}
+
 function isHookInstalled(settings: Record<string, unknown>): boolean {
   const hooks = settings.hooks as HooksConfig | undefined;
   if (!hooks) { return false; }
-  // All events must have an entry with the CURRENT HOOK_ID and point to the current unified script
+  // All events must have an entry with the current HOOK_ID AND point to the current unified script
   return HOOK_EVENTS.every(event => {
     const ours = hooks[event]?.find(e => e._id === HOOK_ID);
     return ours && ours.hooks?.some(h => h.command.includes(HOOK_SCRIPT));
@@ -404,7 +450,10 @@ async function setupHooks(context: vscode.ExtensionContext): Promise<void> {
     try { fs.unlinkSync(path.join(destDir, legacy)); } catch { /* already gone */ }
   }
 
-  // 2. Update settings.local.json
+  // 2. Clean stale entries from settings.json (global) to prevent override conflicts
+  cleanGlobalSettingsHooks();
+
+  // 3. Update settings.local.json
   const settings = readClaudeSettingsJson();
   if (isHookInstalled(settings)) {
     vscode.window.showInformationMessage('Hooks are already configured.');
@@ -420,6 +469,7 @@ async function setupHooks(context: vscode.ExtensionContext): Promise<void> {
       if (hooks[event].length === 0) { delete hooks[event]; }
     }
   }
+
   // Register current events
   for (const event of HOOK_EVENTS) {
     if (!hooks[event]) { hooks[event] = []; }
@@ -447,7 +497,8 @@ async function removeHooks(): Promise<void> {
     return;
   }
 
-  // Clean up ALL owned entries (including legacy PreToolUse/PostToolUse)
+  // Clean up ALL owned entries from both settings files
+  cleanGlobalSettingsHooks();
   for (const event of ALL_OWNED_EVENTS) {
     if (hooks[event]) {
       hooks[event] = filterOurEntries(hooks[event]);

@@ -8,7 +8,7 @@
   "configuration.notificationLevel.warning": "Notify at warning threshold",
   "configuration.notificationLevel.critical": "Notify at critical threshold",
   "configuration.inactiveHours.description": "Hide sessions inactive for more than this many hours",
-  "configuration.enableHookDetection.description": "Enable hook-based session state detection (thinking/waiting/idle). Automatically configures Claude Code hooks when enabled and removes them when disabled. Requires Node.js in PATH.",
+  "configuration.enableHookDetection.description": "Enable hook-based session state detection (thinking/waiting/idle).  \nWhen enabled, this extension:  \n- Writes hook entries to `~/.claude/settings.local.json`  \n- Copies a Node.js script to `~/.claude/hooks/`  \n\nAll changes are **automatically removed** when disabled.  \nRequires **Node.js** in PATH. New Claude Code sessions must be started after toggling.",
   "configuration.progressMode.description": "What the progress bar and percentage represent",
   "configuration.progressMode.compact": "Progress toward next auto-compact (contextUsed / compactThreshold)",
   "configuration.progressMode.context": "Overall context window usage (contextUsed / contextMax)",
@@ -28,5 +28,10 @@
   "configuration.tooltipDisplay.tokens": "Token breakdown (input / output / cache)",
   "configuration.tooltipDisplay.cost": "Estimated cost",
   "configuration.tooltipDisplay.compacts": "Compact event count",
-  "configuration.tooltipDisplay.agents": "Agent count"
+  "configuration.tooltipDisplay.agents": "Agent count",
+  "configuration.defaultGroup.description": "Default grouping mode for session list",
+  "configuration.defaultGroup.none": "No grouping (flat list)",
+  "configuration.defaultGroup.project": "Group by project/folder",
+  "configuration.defaultGroup.status": "Group by status (thinking/waiting/idle/inactive)",
+  "configuration.defaultGroup.custom": "Group by custom user-defined groups"
 }
