@@ -116,11 +116,12 @@ Sort is applied in 3 stages: pinned → status (thinking→waiting→idle→inac
 
 Calculates estimated cost based on token usage in session transcripts.
 
-### Pricing (per 1M tokens, as of 2026-03-24)
+### Pricing (per 1M tokens, as of 2026-04-17)
 
 | Model | Input | Cache Write 5m | Cache Write 1h | Cache Read | Output |
 |-------|-------|---------------|---------------|------------|--------|
-| Opus  | $5.00 | $6.25 | $10.00 | $0.50 | $25.00 |
+| Opus (4.6+) | $5.00 | $6.25 | $10.00 | $0.50 | $25.00 |
+| Opus (4.1/4) | $15.00 | $18.75 | $30.00 | $1.50 | $75.00 |
 | Sonnet| $3.00 | $3.75 | $6.00  | $0.30 | $15.00 |
 | Haiku | $1.00 | $1.25 | $2.00  | $0.10 | $5.00  |
 
@@ -128,7 +129,6 @@ Calculates estimated cost based on token usage in session transcripts.
 
 - Estimates based on public pricing, not actual billing
 - Does not reflect Max/Pro plan discounts
-- Models outside opus/sonnet/haiku are not supported
 
 ## Hook Detection
 

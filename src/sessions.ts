@@ -190,13 +190,14 @@ export function readClaudeSettings(): ClaudeSettings {
 // The base context is the default without [1m] suffix; extended context requires
 // the [1m] suffix which triggers the API beta header context-1m-2025-08-07.
 // Aliases (opus/sonnet/haiku) map to the current default version.
-// (2026-03-29 verified against docs.anthropic.com)
+// (2026-04-17 verified against docs.anthropic.com)
 interface ModelInfo {
   contextSize: number;
   supportsExtended: boolean;
 }
 
 const MODEL_INFO: Record<string, ModelInfo> = {
+  'claude-opus-4-7':   { contextSize: 200_000, supportsExtended: true },
   'claude-opus-4-6':   { contextSize: 200_000, supportsExtended: true },
   'claude-sonnet-4-6': { contextSize: 200_000, supportsExtended: true },
   'claude-opus-4-5':   { contextSize: 200_000, supportsExtended: false },
@@ -211,7 +212,10 @@ const MODEL_INFO: Record<string, ModelInfo> = {
   'haiku':  { contextSize: 200_000, supportsExtended: false },
 };
 
-// API pricing per million tokens (2026-03-24 verified against docs.anthropic.com)
+// API pricing per million tokens (2026-04-17 verified against docs.anthropic.com)
+// Aliases (opus/sonnet/haiku) apply to the current default version and any newer
+// model that shares the alias's pricing. Per-ID entries override the alias for
+// legacy versions whose pricing differs (e.g. Opus 4.1 is 3x the Opus 4.6 rate).
 interface ModelPricing {
   inputPerMToken: number;
   cacheWrite5mPerMToken: number;
@@ -224,6 +228,10 @@ const MODEL_PRICING: Record<string, ModelPricing> = {
   'opus': { inputPerMToken: 5, cacheWrite5mPerMToken: 6.25, cacheWrite1hPerMToken: 10, cacheReadPerMToken: 0.5, outputPerMToken: 25 },
   'sonnet': { inputPerMToken: 3, cacheWrite5mPerMToken: 3.75, cacheWrite1hPerMToken: 6, cacheReadPerMToken: 0.3, outputPerMToken: 15 },
   'haiku': { inputPerMToken: 1, cacheWrite5mPerMToken: 1.25, cacheWrite1hPerMToken: 2, cacheReadPerMToken: 0.1, outputPerMToken: 5 },
+  // Legacy Opus versions priced 3x higher than Opus 4.6+. Listed explicitly so
+  // the alias fallback does not underprice them.
+  'claude-opus-4-1': { inputPerMToken: 15, cacheWrite5mPerMToken: 18.75, cacheWrite1hPerMToken: 30, cacheReadPerMToken: 1.5, outputPerMToken: 75 },
+  'claude-opus-4': { inputPerMToken: 15, cacheWrite5mPerMToken: 18.75, cacheWrite1hPerMToken: 30, cacheReadPerMToken: 1.5, outputPerMToken: 75 },
 };
 
 function normalizeModelId(model: string): string {
@@ -249,8 +257,10 @@ export function formatTokens(n: number): string {
 }
 
 export function calculateCost(s: SessionInfo): number | null {
-  const key = shortenModel(s.model);
-  const pricing = MODEL_PRICING[key];
+  // Prefer exact normalized model ID (covers legacy versions with distinct pricing),
+  // then fall back to the family alias (opus/sonnet/haiku) for current-gen models.
+  const normalized = normalizeModelId(s.model);
+  const pricing = MODEL_PRICING[normalized] ?? MODEL_PRICING[shortenModel(s.model)];
   if (!pricing) { return null; }
   // Breakdown-tracked writes use exact pricing; non-breakdown writes fall back to 1h pricing
   const cacheWriteCost =

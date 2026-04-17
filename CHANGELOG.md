@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.3.0 (2026-04-17)
+
+### Added
+- Claude Opus 4.7 (`claude-opus-4-7`) support with extended context (1M via `[1m]` suffix)
+- Per-model pricing for Opus 4.1 and Opus 4 (Anthropic public rates as of 2026-04-17)
+
+### Fixed
+- Cost calculation for legacy Opus sessions (Opus 4.1 / Opus 4 were underestimated at ~1/3 of actual rate because the `opus` alias applied Opus 4.6 pricing to all versions)
+
 ## 1.0.0 (2026-03-25)
 
 Initial release.
