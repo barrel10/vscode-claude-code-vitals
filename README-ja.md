@@ -6,7 +6,7 @@
 
 Claude Codeセッションのステータス・compact残量・トークン使用量をリアルタイム監視するVS Code拡張。
 
-![スクリーンショット](media/screenshot.png)
+![スクリーンショット](https://raw.githubusercontent.com/barrel10/vscode-claude-code-vitals/main/media/screenshot.png?v=140)
 
 ## インストール
 
