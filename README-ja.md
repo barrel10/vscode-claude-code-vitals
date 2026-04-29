@@ -79,6 +79,7 @@ ext install barrel1054.claude-code-vitals
 | Rate | APIレート制限使用率とリセット時刻 |
 | Cost | コスト合計 |
 | Compacts | compact発火回数合計 |
+| Cleanup | 最古セッションがClaude Codeに自動削除されるまでの残り日数（`cleanupPeriodDays` 設定、デフォルト30日） |
 | Updated | 最新更新時刻 |
 
 ## ソートとフィルタ
@@ -102,6 +103,15 @@ Sessionsビューのタイトルバーメニュー（`...`）から切替。
 | Show All | 全セッション表示（デフォルト） |
 | Warning Only | warning閾値以上のみ |
 | Critical Only | critical閾値以上のみ |
+
+### モデルフィルタ（独立軸、上記フィルタとAND結合）
+
+| フィルタ | 説明 |
+|----------|------|
+| Model All | モデルを問わず表示（デフォルト） |
+| Model Opus | Opusセッションのみ |
+| Model Sonnet | Sonnetセッションのみ |
+| Model Haiku | Haikuセッションのみ |
 
 ## セッションステータス
 
@@ -152,6 +162,8 @@ VS Code設定（`Ctrl+,`）で `claude code vitals` を検索。
 | `inactiveHours` | 24 | 非アクティブセッションの非表示時間 |
 | `defaultSort` | `time` | デフォルトソート順（time/usage/compact） |
 | `defaultFilter` | `all` | デフォルトフィルタ（all/warning/critical） |
+| `defaultModelFilter` | `all` | デフォルトモデルフィルタ（all/opus/sonnet/haiku） |
+| `useEnvOauthToken` | false | usage取得時にディスク上の認証情報より環境変数 `CLAUDE_CODE_OAUTH_TOKEN` を優先する |
 | `progressMode` | `compact` | プログレスバー基準: `compact` or `context` |
 | `cardDisplay` | model, messages, compact, agents, cost ON | カード表示要素 |
 | `tooltipDisplay` | 全項目ON | ツールチップ表示要素 |

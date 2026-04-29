@@ -19,6 +19,7 @@ export interface ClaudeSettings {
   maxTokensOverride: number | null;
   autocompactPct: number;
   contextWindowOverride: number | null;
+  cleanupPeriodDays: number;
 }
 
 export type SessionStatus = 'thinking' | 'waiting' | 'idle' | 'inactive';
@@ -116,6 +117,7 @@ export interface SessionInfo {
 
 export type SortMode = 'time' | 'usage' | 'compact';
 export type FilterMode = 'all' | 'warning' | 'critical';
+export type ModelFilter = 'all' | 'opus' | 'sonnet' | 'haiku';
 export type GroupMode = 'none' | 'project' | 'status' | 'custom';
 
 // ─── Constants ───
@@ -136,6 +138,7 @@ export function readClaudeSettings(): ClaudeSettings {
   let maxTokensOverride: number | null = null;
   let autocompactPct = 95;
   let contextWindowOverride: number | null = null;
+  let cleanupPeriodDays = 30;
   try {
     const settings = JSON.parse(
       fs.readFileSync(path.join(os.homedir(), '.claude', 'settings.json'), 'utf8')
@@ -147,6 +150,9 @@ export function readClaudeSettings(): ClaudeSettings {
     if (override) {
       const n = parseInt(override, 10);
       if (!isNaN(n)) { autocompactPct = n; }
+    }
+    if (typeof settings?.cleanupPeriodDays === 'number' && Number.isFinite(settings.cleanupPeriodDays) && settings.cleanupPeriodDays > 0) {
+      cleanupPeriodDays = Math.floor(settings.cleanupPeriodDays);
     }
   } catch { /* ignore */ }
 
@@ -183,7 +189,7 @@ export function readClaudeSettings(): ClaudeSettings {
     }
   }
 
-  return { maxTokensOverride, autocompactPct, contextWindowOverride };
+  return { maxTokensOverride, autocompactPct, contextWindowOverride, cleanupPeriodDays };
 }
 
 // Model info: base context size and whether the model supports extended (1M) context.
@@ -238,6 +244,10 @@ function normalizeModelId(model: string): string {
   return model.replace(/[\[(]1[mM][\])]$/, '').replace(/-\d{8}$/, '');
 }
 
+function lookupPricing(model: string): ModelPricing | undefined {
+  return MODEL_PRICING[normalizeModelId(model)] ?? MODEL_PRICING[shortenModel(model)];
+}
+
 export function getContextMaxForModel(model: string): number {
   // If model explicitly has [1m] suffix, return 1M (future-proofing)
   if (/[\[(]1[mM][\])]$/.test(model)) { return 1_000_000; }
@@ -259,8 +269,7 @@ export function formatTokens(n: number): string {
 export function calculateCost(s: SessionInfo): number | null {
   // Prefer exact normalized model ID (covers legacy versions with distinct pricing),
   // then fall back to the family alias (opus/sonnet/haiku) for current-gen models.
-  const normalized = normalizeModelId(s.model);
-  const pricing = MODEL_PRICING[normalized] ?? MODEL_PRICING[shortenModel(s.model)];
+  const pricing = lookupPricing(s.model);
   if (!pricing) { return null; }
   // Breakdown-tracked writes use exact pricing; non-breakdown writes fall back to 1h pricing
   const cacheWriteCost =
@@ -273,6 +282,15 @@ export function calculateCost(s: SessionInfo): number | null {
      s.cacheReadTokens * pricing.cacheReadPerMToken +
      s.outputTokens * pricing.outputPerMToken) / 1_000_000
   );
+}
+
+export function findUnknownPricingModels(sessions: SessionInfo[]): string[] {
+  const unknown = new Set<string>();
+  for (const s of sessions) {
+    if (!s.model) { continue; }
+    if (!lookupPricing(s.model)) { unknown.add(s.model); }
+  }
+  return [...unknown];
 }
 
 export function formatRelativeTime(mtimeMs: number): string {

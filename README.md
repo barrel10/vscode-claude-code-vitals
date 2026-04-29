@@ -79,6 +79,7 @@ Aggregated stats across all sessions.
 | Rate | API rate limit usage (5h window) and reset time |
 | Cost | Total cost across all sessions |
 | Compacts | Total compact events |
+| Cleanup | Days until Claude Code auto-deletes the oldest session (`cleanupPeriodDays`, default 30) |
 | Updated | Most recent session update |
 
 ## Sort & Filter
@@ -102,6 +103,15 @@ Sort is applied in 3 stages: pinned → status (thinking→waiting→idle→inac
 | Show All | All sessions (default) |
 | Warning Only | Sessions above warning threshold |
 | Critical Only | Sessions above critical threshold |
+
+### Model Filter (independent axis, AND-combined with the above)
+
+| Filter | Description |
+|--------|-------------|
+| Model All | Sessions of any model (default) |
+| Model Opus | Opus sessions only |
+| Model Sonnet | Sonnet sessions only |
+| Model Haiku | Haiku sessions only |
 
 ## Session Status
 
@@ -152,6 +162,8 @@ Search `claude code vitals` in VS Code settings (`Ctrl+,`).
 | `inactiveHours` | 24 | Hide sessions inactive for this many hours |
 | `defaultSort` | `time` | Default sort order (time/usage/compact) |
 | `defaultFilter` | `all` | Default filter (all/warning/critical) |
+| `defaultModelFilter` | `all` | Default model filter (all/opus/sonnet/haiku) |
+| `useEnvOauthToken` | false | Use `CLAUDE_CODE_OAUTH_TOKEN` from the environment before disk credentials when fetching usage |
 | `progressMode` | `compact` | Progress bar basis: `compact` or `context` |
 | `cardDisplay` | model, messages, compact, agents, cost ON | Card metadata elements |
 | `tooltipDisplay` | all ON | Tooltip elements |

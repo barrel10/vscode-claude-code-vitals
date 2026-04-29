@@ -1,7 +1,8 @@
 import * as vscode from 'vscode';
 import {
-  SessionInfo, SessionStatus, SortMode, FilterMode, GroupMode,
+  SessionInfo, SessionStatus, SortMode, FilterMode, ModelFilter, GroupMode,
   formatTokens, formatRelativeTime, shortenModel, calculateCost,
+  ClaudeSettings,
 } from './sessions';
 import { RateLimitInfo, formatResetTime } from './ratelimit';
 
@@ -26,6 +27,7 @@ export class SessionWebviewProvider implements vscode.WebviewViewProvider {
   private allSessions: SessionInfo[] = [];
   private sortMode: SortMode = 'time';
   private filterMode: FilterMode = 'all';
+  private modelFilter: ModelFilter = 'all';
   private warningThreshold = 75;
   private criticalThreshold = 95;
   private rateLimit: RateLimitInfo | null = null;
@@ -232,6 +234,11 @@ export class SessionWebviewProvider implements vscode.WebviewViewProvider {
 
   setFilterMode(mode: FilterMode): void {
     this.filterMode = mode;
+    this.render();
+  }
+
+  setModelFilter(mode: ModelFilter): void {
+    this.modelFilter = mode;
     this.render();
   }
 
@@ -644,13 +651,14 @@ body {
   }
 
   private applyFilter(sessions: SessionInfo[]): SessionInfo[] {
-    switch (this.filterMode) {
-      case 'warning': return sessions.filter(s =>
-        this.getProgress(s) >= this.warningThreshold);
-      case 'critical': return sessions.filter(s =>
-        this.getProgress(s) >= this.criticalThreshold);
-      default: return sessions;
+    let result = sessions;
+    if (this.filterMode === 'warning') {
+      result = sessions.filter(s => this.getProgress(s) >= this.warningThreshold);
+    } else if (this.filterMode === 'critical') {
+      result = sessions.filter(s => this.getProgress(s) >= this.criticalThreshold);
     }
+    if (this.modelFilter === 'all') { return result; }
+    return result.filter(s => shortenModel(s.model) === this.modelFilter);
   }
 
   private statusOrder(s: SessionInfo): number {
@@ -697,9 +705,16 @@ export class OverviewTreeProvider implements vscode.TreeDataProvider<vscode.Tree
 
   private sessions: SessionInfo[] = [];
   private rateLimit: RateLimitInfo | null = null;
+  private claudeSettings: ClaudeSettings = {
+    maxTokensOverride: null,
+    autocompactPct: 95,
+    contextWindowOverride: null,
+    cleanupPeriodDays: 30,
+  };
 
-  update(sessions: SessionInfo[]): void {
+  update(sessions: SessionInfo[], claudeSettings?: ClaudeSettings): void {
     this.sessions = sessions;
+    if (claudeSettings) { this.claudeSettings = claudeSettings; }
     this._onDidChange.fire();
   }
 
@@ -716,6 +731,7 @@ export class OverviewTreeProvider implements vscode.TreeDataProvider<vscode.Tree
     const waitingCount = this.sessions.filter(s => s.status === 'waiting').length;
     const maxUsage = total > 0 ? Math.max(...this.sessions.map(s => s.usagePercent)) : 0;
     const latestMtime = total > 0 ? Math.max(...this.sessions.map(s => s.displayMtimeMs)) : 0;
+    const oldestMtime = total > 0 ? Math.min(...this.sessions.map(s => s.displayMtimeMs)) : 0;
 
     const items: vscode.TreeItem[] = [];
     const addItem = (label: string, value: string, icon: string, color?: string) => {
@@ -775,6 +791,13 @@ export class OverviewTreeProvider implements vscode.TreeDataProvider<vscode.Tree
     const totalAgents = this.sessions.reduce((sum, s) => sum + s.totalAgentCount, 0);
     if (totalAgents > 0) {
       addItem('Agents', `${totalAgents} spawned${totalActiveAgents > 0 ? ` (${totalActiveAgents} active)` : ''}`, 'server-process', 'charts.blue');
+    }
+
+    if (oldestMtime > 0) {
+      const elapsedDays = Math.floor((Date.now() - oldestMtime) / 86_400_000);
+      const remainingDays = Math.max(0, this.claudeSettings.cleanupPeriodDays - elapsedDays);
+      const cleanupColor = remainingDays <= 3 ? 'charts.red' : remainingDays <= 7 ? 'charts.yellow' : 'charts.blue';
+      addItem('Cleanup', `${this.claudeSettings.cleanupPeriodDays}d (oldest in ${remainingDays}d)`, 'trash', cleanupColor);
     }
 
     addItem('Updated', latestMtime > 0 ? formatRelativeTime(latestMtime) : '-', 'clock');

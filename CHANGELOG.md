@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.4.0 (2026-04-29)
+
+### Added
+- Model filter (opus / sonnet / haiku) as an independent axis combined with the existing warning/critical filter via AND. New commands `Claude Code Vitals: Model All / Opus / Sonnet / Haiku` and setting `claudeCodeVitals.defaultModelFilter`
+- Cleanup countdown in Overview using Claude Code's `cleanupPeriodDays` setting (default 30) so the oldest session's auto-deletion ETA is visible
+- Optional `CLAUDE_CODE_OAUTH_TOKEN` environment override for usage fetch (preferred over disk credentials), gated by new setting `claudeCodeVitals.useEnvOauthToken` (off by default). Helpful for CI / env-only sessions
+- Output channel warning when an unknown model id is detected so cost estimation gaps are surfaced (one log per id)
+
+### Fixed
+- Race window where a stale rate-limit fetch could overwrite fresh `cached` / `backoffUntil` after a forced re-fetch (introduced by the env fallback). Now guarded by a per-fetch generation counter
+- Disk credentials watcher no longer resets backoff while the env token is the active source
+
 ## 1.3.0 (2026-04-17)
 
 ### Added

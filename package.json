@@ -2,7 +2,7 @@
   "name": "claude-code-vitals",
   "displayName": "Claude Code Vitals",
   "description": "Real-time session status detection, multi-session management, and compact tracking for Claude Code",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "publisher": "barrel1054",
   "license": "MIT",
   "repository": {
@@ -77,6 +77,22 @@
         "title": "Claude Code Vitals: Critical Only"
       },
       {
+        "command": "claude-code-vitals.modelFilterAll",
+        "title": "Claude Code Vitals: Model All"
+      },
+      {
+        "command": "claude-code-vitals.modelFilterOpus",
+        "title": "Claude Code Vitals: Model Opus"
+      },
+      {
+        "command": "claude-code-vitals.modelFilterSonnet",
+        "title": "Claude Code Vitals: Model Sonnet"
+      },
+      {
+        "command": "claude-code-vitals.modelFilterHaiku",
+        "title": "Claude Code Vitals: Model Haiku"
+      },
+      {
         "command": "claude-code-vitals.toggleShowHidden",
         "title": "Claude Code Vitals: Toggle Hidden Sessions"
       },
@@ -145,6 +161,26 @@
           "command": "claude-code-vitals.filterCritical",
           "when": "view == claudeCodeVitalsSessionView",
           "group": "2_filter@3"
+        },
+        {
+          "command": "claude-code-vitals.modelFilterAll",
+          "when": "view == claudeCodeVitalsSessionView",
+          "group": "5_modelFilter@1"
+        },
+        {
+          "command": "claude-code-vitals.modelFilterOpus",
+          "when": "view == claudeCodeVitalsSessionView",
+          "group": "5_modelFilter@2"
+        },
+        {
+          "command": "claude-code-vitals.modelFilterSonnet",
+          "when": "view == claudeCodeVitalsSessionView",
+          "group": "5_modelFilter@3"
+        },
+        {
+          "command": "claude-code-vitals.modelFilterHaiku",
+          "when": "view == claudeCodeVitalsSessionView",
+          "group": "5_modelFilter@4"
         },
         {
           "command": "claude-code-vitals.toggleShowHidden",
@@ -243,6 +279,19 @@
           "enum": ["all", "warning", "critical"],
           "order": 8,
           "description": "%configuration.defaultFilter.description%"
+        },
+        "claudeCodeVitals.defaultModelFilter": {
+          "type": "string",
+          "default": "all",
+          "enum": ["all", "opus", "sonnet", "haiku"],
+          "order": 13,
+          "description": "%configuration.defaultModelFilter.description%"
+        },
+        "claudeCodeVitals.useEnvOauthToken": {
+          "type": "boolean",
+          "default": false,
+          "order": 14,
+          "description": "%configuration.useEnvOauthToken.description%"
         },
         "claudeCodeVitals.defaultGroup": {
           "type": "string",

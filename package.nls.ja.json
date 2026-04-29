@@ -14,6 +14,8 @@
   "configuration.progressMode.context": "コンテキストウィンドウ全体の使用率（contextUsed / contextMax）",
   "configuration.defaultSort.description": "セッション一覧のデフォルトソート順",
   "configuration.defaultFilter.description": "セッション一覧のデフォルトフィルタ",
+  "configuration.defaultModelFilter.description": "セッション一覧のデフォルトモデルフィルタ",
+  "configuration.useEnvOauthToken.description": "usage取得時にディスク上の認証情報より環境変数 CLAUDE_CODE_OAUTH_TOKEN を優先する",
   "configuration.cardDisplay.description": "セッションカードに表示する要素",
   "configuration.cardDisplay.sparkline": "コンテキスト使用量のスパークラインチャート",
   "configuration.cardDisplay.model": "モデル名",

@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import * as https from 'https';
+import * as vscode from 'vscode';
 
 // ─── Types ───
 
@@ -38,7 +39,9 @@ let backoffUntil = 0;
 let inFlight: Promise<RateLimitInfo | null> | null = null;
 let lastCredMtimeMs = 0;
 let lastAccessToken = '';
+let lastDiskAccessToken = '';
 let credWatcher: fs.FSWatcher | null = null;
+let fetchGeneration = 0;
 
 // ─── Helpers ───
 
@@ -51,6 +54,16 @@ function readCredentials(): Credentials | null {
 function isTokenExpired(expiresAt: number | undefined): boolean {
   if (!expiresAt) { return false; } // unknown expiry → try anyway
   return Date.now() + TOKEN_EXPIRY_MARGIN_MS >= expiresAt;
+}
+
+/** Read CLAUDE_CODE_OAUTH_TOKEN from env, trimming whitespace and rejecting control characters.
+ *  Returns empty string if the value is absent, blank, or contains \r / \n. */
+function readEnvToken(): string {
+  const raw = process.env.CLAUDE_CODE_OAUTH_TOKEN;
+  if (!raw) { return ''; }
+  const trimmed = raw.trim();
+  if (!trimmed || /[\r\n]/.test(trimmed)) { return ''; }
+  return trimmed;
 }
 
 function httpsRequest(url: string, options: https.RequestOptions): Promise<string> {
@@ -102,7 +115,7 @@ export function startCredentialsWatch(onRefreshed?: () => void): void {
 
   // Record initial state
   const cred = readCredentials();
-  lastAccessToken = cred?.claudeAiOauth?.accessToken || '';
+  lastDiskAccessToken = cred?.claudeAiOauth?.accessToken || '';
   try { lastCredMtimeMs = fs.statSync(CRED_PATH).mtimeMs; } catch { /* ignore */ }
 
   // Try watching the file directly; fall back to parent dir if file doesn't exist yet
@@ -130,9 +143,12 @@ function onCredentialsChanged(): void {
 
     const cred = readCredentials();
     const newToken = cred?.claudeAiOauth?.accessToken || '';
-    if (newToken && newToken !== lastAccessToken) {
-      // Claude Code refreshed the token — clear backoff and notify
-      lastAccessToken = newToken;
+    if (newToken && newToken !== lastDiskAccessToken) {
+      lastDiskAccessToken = newToken;
+      // Skip backoff reset and notification when env token is active
+      const useEnvOauthToken = vscode.workspace.getConfiguration('claudeCodeVitals').get<boolean>('useEnvOauthToken', false);
+      if (useEnvOauthToken && readEnvToken()) { return; }
+      // Claude Code refreshed the disk token — clear backoff and notify
       backoffUntil = 0;
       if (onCredentialsRefreshed) { onCredentialsRefreshed(); }
     }
@@ -145,41 +161,59 @@ export function getCachedRateLimits(): RateLimitInfo | null {
   return cached;
 }
 
-export async function fetchRateLimits(): Promise<RateLimitInfo | null> {
+export async function fetchRateLimits(force?: boolean): Promise<RateLimitInfo | null> {
   const now = Date.now();
 
   // Deduplicate concurrent requests (must be before interval check)
-  if (inFlight) { return inFlight; }
+  if (!force && inFlight) { return inFlight; }
 
-  // Rate limiting: skip if within interval or backoff (regardless of cached state)
-  if (now - lastFetchMs < MIN_FETCH_INTERVAL_MS) { return cached; }
-  if (now < backoffUntil) { return cached; }
+  const useEnvOauthToken = vscode.workspace.getConfiguration('claudeCodeVitals').get<boolean>('useEnvOauthToken', false);
+  let token = '';
+  let expiresAt: number | undefined;
+  if (useEnvOauthToken) {
+    token = readEnvToken();
+  }
 
-  const cred = readCredentials();
-  const oauth = cred?.claudeAiOauth;
-  const token = oauth?.accessToken;
+  if (!token) {
+    const cred = readCredentials();
+    const oauth = cred?.claudeAiOauth;
+    token = oauth?.accessToken || '';
+    expiresAt = oauth?.expiresAt;
+  }
   if (!token) { return cached; }
 
+  const tokenChanged = token !== lastAccessToken;
+  if (tokenChanged) { backoffUntil = 0; }
+
+  // Rate limiting: skip if within interval or backoff unless the active token changed.
+  if (!force && !tokenChanged && now - lastFetchMs < MIN_FETCH_INTERVAL_MS) { return cached; }
+  if (!force && now < backoffUntil) { return cached; }
+
   // Skip API call if token is expired or expiring soon — wait for Claude Code to refresh
-  if (isTokenExpired(oauth?.expiresAt)) { return cached; }
+  if (isTokenExpired(expiresAt)) { return cached; }
 
   // Track token for change detection
-  if (token !== lastAccessToken) { lastAccessToken = token; }
+  if (tokenChanged) { lastAccessToken = token; }
 
   // Update lastFetchMs only when actually starting a fetch
   lastFetchMs = now;
 
-  inFlight = fetchUsage(token).then(info => {
-    cached = info;
-    inFlight = null;
+  const myGeneration = ++fetchGeneration;
+  const promise = fetchUsage(token).then(info => {
+    if (myGeneration === fetchGeneration) {
+      cached = info;
+      inFlight = null;
+    }
     return info;
   }).catch(() => {
-    backoffUntil = Date.now() + BACKOFF_MS;
-    inFlight = null;
+    if (myGeneration === fetchGeneration) {
+      backoffUntil = Date.now() + BACKOFF_MS;
+      inFlight = null;
+    }
     return cached;
   });
-
-  return inFlight;
+  inFlight = promise;
+  return promise;
 }
 
 export function formatResetTime(isoTimestamp: string): string {

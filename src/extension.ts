@@ -5,7 +5,8 @@ import * as os from 'os';
 
 import {
   readClaudeSettings, findAllSessionsCached, clearSessionCache,
-  ClaudeSettings, getMonitorDir, SortMode, FilterMode, GroupMode,
+  ClaudeSettings, getMonitorDir, SortMode, FilterMode, ModelFilter, GroupMode,
+  findUnknownPricingModels,
 } from './sessions';
 import { SessionWebviewProvider, OverviewTreeProvider } from './views';
 import { fetchRateLimits, startCredentialsWatch, stopCredentialsWatch } from './ratelimit';
@@ -61,7 +62,7 @@ export function activate(context: vscode.ExtensionContext) {
 
   let watchers = new Map<string, fs.FSWatcher>();
   let lastMtimes = new Map<string, number>();
-  let lastSettings: ClaudeSettings = { maxTokensOverride: null, autocompactPct: 0, contextWindowOverride: null };
+  let lastSettings: ClaudeSettings = { maxTokensOverride: null, autocompactPct: 0, contextWindowOverride: null, cleanupPeriodDays: 30 };
   let lastWarnThreshold = -1;
   let lastCritThreshold = -1;
   let lastInactiveHours = -1;
@@ -71,6 +72,7 @@ export function activate(context: vscode.ExtensionContext) {
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
   let pollTimer: ReturnType<typeof setInterval>;
   const notifiedSessions = new Set<string>();
+  const reportedUnknownModels = new Set<string>();
 
   function scheduleRefresh() {
     if (debounceTimer) { clearTimeout(debounceTimer); }
@@ -94,7 +96,8 @@ export function activate(context: vscode.ExtensionContext) {
     const settingsChanged =
       settings.maxTokensOverride !== lastSettings.maxTokensOverride ||
       settings.autocompactPct !== lastSettings.autocompactPct ||
-      settings.contextWindowOverride !== lastSettings.contextWindowOverride;
+      settings.contextWindowOverride !== lastSettings.contextWindowOverride ||
+      settings.cleanupPeriodDays !== lastSettings.cleanupPeriodDays;
     const progressMode = config.get<string>('progressMode', 'compact') as 'compact' | 'context';
     const cardDisplayObj = config.get<Record<string, boolean>>('cardDisplay', {});
     const tooltipDisplayObj = config.get<Record<string, boolean>>('tooltipDisplay', {});
@@ -172,7 +175,13 @@ export function activate(context: vscode.ExtensionContext) {
     // Always update views (status is time-dependent)
     sessionProvider.updateDisplaySettings(cardDisplay, tooltipDisplay, progressMode);
     sessionProvider.update(sessions, warnThreshold, critThreshold, history);
-    overviewProvider.update(sessions);
+    overviewProvider.update(sessions, settings);
+
+    for (const modelId of findUnknownPricingModels(sessions)) {
+      if (reportedUnknownModels.has(modelId)) { continue; }
+      reportedUnknownModels.add(modelId);
+      log(`[pricing] Unknown model: ${modelId} — cost reported as $0. Update MODEL_PRICING in sessions.ts.`);
+    }
 
     // Fetch rate limits asynchronously (only when data changed, respects 60s cache)
     if (dataChanged) {
@@ -210,9 +219,11 @@ export function activate(context: vscode.ExtensionContext) {
     const cfg = vscode.workspace.getConfiguration('claudeCodeVitals');
     const defaultSort = cfg.get<SortMode>('defaultSort', 'time');
     const defaultFilter = cfg.get<FilterMode>('defaultFilter', 'all');
+    const defaultModelFilter = cfg.get<ModelFilter>('defaultModelFilter', 'all');
     const defaultGroup = cfg.get<GroupMode>('defaultGroup', 'none');
     if (defaultSort !== 'time') { sessionProvider.setSortMode(defaultSort); }
     if (defaultFilter !== 'all') { sessionProvider.setFilterMode(defaultFilter); }
+    if (defaultModelFilter !== 'all') { sessionProvider.setModelFilter(defaultModelFilter); }
     if (defaultGroup !== 'none') { sessionProvider.setGroupMode(defaultGroup); }
   }
 
@@ -225,6 +236,10 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand('claude-code-vitals.filterAll', () => sessionProvider.setFilterMode('all')),
     vscode.commands.registerCommand('claude-code-vitals.filterWarning', () => sessionProvider.setFilterMode('warning')),
     vscode.commands.registerCommand('claude-code-vitals.filterCritical', () => sessionProvider.setFilterMode('critical')),
+    vscode.commands.registerCommand('claude-code-vitals.modelFilterAll', () => sessionProvider.setModelFilter('all')),
+    vscode.commands.registerCommand('claude-code-vitals.modelFilterOpus', () => sessionProvider.setModelFilter('opus')),
+    vscode.commands.registerCommand('claude-code-vitals.modelFilterSonnet', () => sessionProvider.setModelFilter('sonnet')),
+    vscode.commands.registerCommand('claude-code-vitals.modelFilterHaiku', () => sessionProvider.setModelFilter('haiku')),
     vscode.commands.registerCommand('claude-code-vitals.toggleShowHidden', () => sessionProvider.toggleShowHidden()),
     vscode.commands.registerCommand('claude-code-vitals.groupNone', () => sessionProvider.setGroupMode('none')),
     vscode.commands.registerCommand('claude-code-vitals.groupByProject', () => sessionProvider.setGroupMode('project')),
@@ -256,6 +271,13 @@ export function activate(context: vscode.ExtensionContext) {
           } else {
             removeHooks();
           }
+        }
+
+        // Re-fetch rate limits immediately when token source changes
+        if (e.affectsConfiguration('claudeCodeVitals.useEnvOauthToken')) {
+          fetchRateLimits(true).then(info => {
+            overviewProvider.updateRateLimit(info);
+          }).catch((e) => { log(`Failed to fetch rate limits: ${e}`); });
         }
       }
     }),

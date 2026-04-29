@@ -14,6 +14,8 @@
   "configuration.progressMode.context": "Overall context window usage (contextUsed / contextMax)",
   "configuration.defaultSort.description": "Default sort order for session list",
   "configuration.defaultFilter.description": "Default filter for session list",
+  "configuration.defaultModelFilter.description": "Default model filter for session list",
+  "configuration.useEnvOauthToken.description": "Use CLAUDE_CODE_OAUTH_TOKEN from the environment before disk credentials when fetching usage",
   "configuration.cardDisplay.description": "Elements to show on session cards",
   "configuration.cardDisplay.sparkline": "Context usage sparkline chart",
   "configuration.cardDisplay.model": "Model name",
