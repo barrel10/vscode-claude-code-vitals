@@ -528,6 +528,7 @@ function parseSessionJsonl(
     let sessionId = '';
     let firstUserText = '';
     let aiTitle = '';
+    let customTitle = '';
     let lastUserIdx = -1;
     let lastAssistantIdx = -1;
     let lastStopReason = '';
@@ -543,7 +544,7 @@ function parseSessionJsonl(
         }
         if (data.sessionId && !sessionId) { sessionId = data.sessionId; }
         if (data.type === 'custom-title' && data.customTitle) {
-          aiTitle = data.customTitle;
+          customTitle = data.customTitle;
         } else if (data.type === 'ai-title' && data.aiTitle) {
           aiTitle = data.aiTitle;
         }
@@ -649,7 +650,8 @@ function parseSessionJsonl(
     const usagePercent = (contextUsed / compactThreshold) * 100;
     const tokensUntilCompact = Math.max(0, compactThreshold - contextUsed);
 
-    const sessionName = aiTitle
+    const sessionName = customTitle
+      || aiTitle
       || cleanSessionName(
         firstUserText
           ? firstUserText.replace(/\n/g, ' ').trim()

@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.4.1 (2026-05-29)
+
+### Fixed
+- Manually renamed sessions no longer revert to an AI-generated title shortly after the rename
+
 ## 1.4.0 (2026-04-29)
 
 ### Added
