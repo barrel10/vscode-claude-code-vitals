@@ -62,7 +62,14 @@ export function activate(context: vscode.ExtensionContext) {
 
   let watchers = new Map<string, fs.FSWatcher>();
   let lastMtimes = new Map<string, number>();
-  let lastSettings: ClaudeSettings = { maxTokensOverride: null, autocompactPct: 0, contextWindowOverride: null, cleanupPeriodDays: 30 };
+  let lastSettings: ClaudeSettings = {
+    maxTokensOverride: null,
+    autocompactPct: 0,
+    contextWindowOverride: null,
+    cleanupPeriodDays: 30,
+    autoCompactWindow: null,
+    autoCompactEnabled: true,
+  };
   let lastWarnThreshold = -1;
   let lastCritThreshold = -1;
   let lastInactiveHours = -1;
@@ -96,9 +103,10 @@ export function activate(context: vscode.ExtensionContext) {
     const settingsChanged =
       settings.maxTokensOverride !== lastSettings.maxTokensOverride ||
       settings.autocompactPct !== lastSettings.autocompactPct ||
-      settings.pctOverride !== lastSettings.pctOverride ||
       settings.contextWindowOverride !== lastSettings.contextWindowOverride ||
       settings.cleanupPeriodDays !== lastSettings.cleanupPeriodDays ||
+      settings.autoCompactWindow !== lastSettings.autoCompactWindow ||
+      settings.autoCompactEnabled !== lastSettings.autoCompactEnabled ||
       settings.autoCompactWindowEnv !== lastSettings.autoCompactWindowEnv ||
       settings.maxOutputTokensEnv !== lastSettings.maxOutputTokensEnv ||
       settings.disableCompact !== lastSettings.disableCompact ||

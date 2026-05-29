@@ -18,9 +18,10 @@ export interface Usage {
 export interface ClaudeSettings {
   maxTokensOverride: number | null;
   autocompactPct: number;
-  pctOverride?: number | null;
   contextWindowOverride: number | null;
   cleanupPeriodDays: number;
+  autoCompactWindow?: number | null;
+  autoCompactEnabled?: boolean;
   autoCompactWindowEnv?: number | null;
   maxOutputTokensEnv?: number | null;
   disableCompact?: boolean;
@@ -138,9 +139,9 @@ export type GroupMode = 'none' | 'project' | 'status' | 'custom';
 export type AutoCompactSource = 'env' | 'settings' | 'default';
 
 export interface AutoCompactSettings {
-  pctOverride?: number;
   autoCompactWindowEnv?: number;
   autoCompactWindowSettings?: number;
+  autoCompactEnabled?: boolean;
   maxOutputTokensEnv?: number;
   disableCompact?: boolean;
   disableAutoCompact?: boolean;
@@ -184,11 +185,6 @@ function parsePositiveNumber(value: unknown): number | null {
   return null;
 }
 
-function parsePctOverride(value: unknown): number | null {
-  const n = parsePositiveNumber(value);
-  return n !== null && n <= 100 ? n : null;
-}
-
 function envTruthy(value: unknown): boolean {
   if (typeof value === 'boolean') { return value; }
   if (typeof value === 'number') { return value !== 0; }
@@ -205,8 +201,9 @@ function getSettingsCacheKey(settings: ClaudeSettings): string {
   return JSON.stringify({
     maxTokensOverride: settings.maxTokensOverride,
     autocompactPct: settings.autocompactPct,
-    pctOverride: settings.pctOverride ?? null,
     contextWindowOverride: settings.contextWindowOverride,
+    autoCompactWindow: settings.autoCompactWindow ?? null,
+    autoCompactEnabled: settings.autoCompactEnabled !== false,
     autoCompactWindowEnv: settings.autoCompactWindowEnv ?? null,
     maxOutputTokensEnv: settings.maxOutputTokensEnv ?? null,
     disableCompact: !!settings.disableCompact,
@@ -222,6 +219,8 @@ export function readClaudeSettings(): ClaudeSettings {
   let autocompactPct = 95;
   let contextWindowOverride: number | null = null;
   let cleanupPeriodDays = 30;
+  let autoCompactWindow: number | null = null;
+  let autoCompactEnabled = true;
   let autoCompactWindowEnv: number | null = null;
   let maxOutputTokensEnv: number | null = null;
   let disableCompact = false;
@@ -243,10 +242,12 @@ export function readClaudeSettings(): ClaudeSettings {
     if (typeof settings?.cleanupPeriodDays === 'number' && Number.isFinite(settings.cleanupPeriodDays) && settings.cleanupPeriodDays > 0) {
       cleanupPeriodDays = Math.floor(settings.cleanupPeriodDays);
     }
+    if (typeof settings?.autoCompactWindow === 'number' && Number.isInteger(settings.autoCompactWindow) && settings.autoCompactWindow > 0) {
+      autoCompactWindow = settings.autoCompactWindow;
+    }
+    autoCompactEnabled = settings?.autoCompactEnabled === false ? false : true;
   } catch { /* ignore */ }
 
-  const pctOverride = parsePctOverride(envValue('CLAUDE_AUTOCOMPACT_PCT_OVERRIDE', settingsEnv));
-  if (pctOverride !== null) { autocompactPct = pctOverride; }
   autoCompactWindowEnv = parsePositiveNumber(envValue('CLAUDE_CODE_AUTO_COMPACT_WINDOW', settingsEnv));
   maxOutputTokensEnv = parsePositiveNumber(envValue('CLAUDE_CODE_MAX_OUTPUT_TOKENS', settingsEnv));
   disableCompact = envTruthy(envValue('DISABLE_COMPACT', settingsEnv));
@@ -297,8 +298,9 @@ export function readClaudeSettings(): ClaudeSettings {
   } catch { /* ignore */ }
 
   return {
-    maxTokensOverride, autocompactPct, pctOverride, contextWindowOverride,
+    maxTokensOverride, autocompactPct, contextWindowOverride,
     cleanupPeriodDays,
+    autoCompactWindow, autoCompactEnabled,
     autoCompactWindowEnv, maxOutputTokensEnv,
     disableCompact, disableAutoCompact, claudeCodeRemote,
     redwood2AutoCompactWindow, redwood3,
@@ -398,7 +400,7 @@ export function computeAutoCompact(
   if (source === 'default' && settings.autoCompactWindowSettings !== undefined) {
     const settingsWindow = parsePositiveNumber(settings.autoCompactWindowSettings);
     if (settingsWindow !== null) {
-      window = Math.min(modelMaxWindow, settingsWindow);
+      window = Math.min(modelMaxWindow, clampNumber(settingsWindow, MIN_AUTO_COMPACT_WINDOW, MAX_AUTO_COMPACT_WINDOW));
       source = 'settings';
     }
   }
@@ -406,13 +408,10 @@ export function computeAutoCompact(
   const maxOutputTokens = parsePositiveNumber(settings.maxOutputTokensEnv) ?? getDefaultMaxOutputTokens(model);
   const outputReserve = Math.min(maxOutputTokens, OUTPUT_RESERVE_CAP);
   const effectiveWindow = Math.max(1, window - outputReserve);
-  const pct = parsePctOverride(settings.pctOverride);
   const compactCeiling = Math.max(1, effectiveWindow - COMPACT_BUFFER);
-  const compactThreshold = pct !== null
-    ? Math.max(1, Math.min(Math.floor(effectiveWindow * pct / 100), compactCeiling))
-    : compactCeiling;
+  const compactThreshold = compactCeiling;
 
-  const autoCompactEnabled = !settings.disableCompact && !settings.disableAutoCompact;
+  const autoCompactEnabled = settings.autoCompactEnabled !== false && !settings.disableCompact && !settings.disableAutoCompact;
   const local = !settings.claudeCodeRemote;
   const hasConfiguredWindow = source === 'env' || source === 'settings';
   const active = !!autoCompactEnabled && (!local || !!settings.redwood3 || hasConfiguredWindow);
@@ -834,13 +833,13 @@ function parseSessionJsonl(
       ?? explicit1m
       ?? (isExtendedContextModel(lastModel) ? settings.contextWindowOverride : null)
       ?? getContextMaxForModel(lastModel);
-    const autoCompactWindowSettings = normalizeModelId(lastModel) === 'claude-opus-4-8'
+    const autoCompactWindowSettings = settings.autoCompactWindow ?? (normalizeModelId(lastModel) === 'claude-opus-4-8'
       ? settings.redwood2AutoCompactWindow
-      : null;
+      : null);
     const autoCompact = computeAutoCompact(lastModel, contextMax, {
-      pctOverride: settings.pctOverride ?? undefined,
       autoCompactWindowEnv: settings.autoCompactWindowEnv ?? undefined,
       autoCompactWindowSettings: autoCompactWindowSettings ?? undefined,
+      autoCompactEnabled: settings.autoCompactEnabled,
       maxOutputTokensEnv: settings.maxOutputTokensEnv ?? undefined,
       disableCompact: settings.disableCompact,
       disableAutoCompact: settings.disableAutoCompact,

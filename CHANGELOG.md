@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.5.1 (2026-05-30)
+
+### Fixed
+- Auto-compact progress now reflects Claude Code's actual auto-compact configuration. The extension now reads `autoCompactWindow` and `autoCompactEnabled` from `~/.claude/settings.json` (matching Claude Code's official settings) instead of an unused experimental override
+
 ## 1.5.0 (2026-05-30)
 
 ### Added
