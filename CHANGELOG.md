@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.5.0 (2026-05-30)
+
+### Added
+- Claude Opus 4.8 support with 1M extended context (fixes the ~50% usage gauge that previously appeared immediately after starting an Opus 4.8 session)
+
+### Fixed
+- Cost, total tokens, and message counts were over-reported (roughly 2.2x, and ~2.6x for sub-agents) due to duplicated session records. Counts are now correctly deduplicated
+- Auto-compact progress no longer over-reports (occasional 100%+ readings) on recent Claude Code versions. The display now matches the actual auto-compact behavior, including when auto-compact is disabled
+
 ## 1.4.1 (2026-05-29)
 
 ### Fixed

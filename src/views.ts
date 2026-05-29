@@ -493,6 +493,8 @@ body {
       ? s.sessionName.substring(0, 42) + '...' : s.sessionName);
     const time = formatRelativeTime(s.displayMtimeMs);
     const compact = formatTokens(s.tokensUntilCompact);
+    const effectiveWindow = s.effectiveWindow || s.contextMax;
+    const windowUsage = effectiveWindow > 0 ? (s.contextUsed / effectiveWindow) * 100 : 0;
     const model = shortenModel(s.model);
     const progress = Math.min(100, this.getProgress(s));
     const pct = progress.toFixed(0);
@@ -502,10 +504,15 @@ body {
     const tooltipLines = [s.sessionName, s.model];
     if (tt.has('context')) {
       tooltipLines.push(`Context: ${formatTokens(s.contextUsed)} / ${formatTokens(s.contextMax)} (${(s.contextUsed / s.contextMax * 100).toFixed(0)}%)`);
+      tooltipLines.push(`Effective window: ${formatTokens(effectiveWindow)} (reserve: ${formatTokens(s.outputReserve || 0)})`);
     }
     if (tt.has('compact')) {
-      const compactProgress = Math.min(100, (() => { const t = s.contextMax * s.autocompactPct / 100; return t > 0 ? (s.contextUsed / t) * 100 : 0; })());
-      tooltipLines.push(`Compact at ${s.autocompactPct}%: ${compact} left (${compactProgress.toFixed(0)}%)`);
+      if (s.autoCompactActive) {
+        const compactProgress = s.compactThreshold > 0 ? (s.contextUsed / s.compactThreshold) * 100 : 0;
+        tooltipLines.push(`Compact threshold: ${formatTokens(s.compactThreshold)} (${compact} left, ${compactProgress.toFixed(0)}%, source: ${s.autoCompactSource})`);
+      } else {
+        tooltipLines.push(`Auto-compact inactive: window usage ${windowUsage.toFixed(0)}% (source: ${s.autoCompactSource})`);
+      }
     }
     if (tt.has('messages')) {
       tooltipLines.push(`Messages: ${s.messageCount}`);
@@ -529,7 +536,9 @@ body {
     const meta: string[] = [];
     if (cd.has('model') && model) { meta.push(model); }
     if (cd.has('messages')) { meta.push(`${s.messageCount} msgs`); }
-    if (cd.has('compact')) { meta.push(`compact ${compact}`); }
+    if (cd.has('compact')) {
+      meta.push(s.autoCompactActive ? `compact ${compact}` : `window ${windowUsage.toFixed(0)}% off`);
+    }
     if (cd.has('agents') && s.totalAgentCount > 0) { meta.push(`${s.totalAgentCount} agents`); }
     if (cd.has('cost') && cost !== null) { meta.push('$' + cost.toFixed(2)); }
 
@@ -646,7 +655,7 @@ body {
     if (this.progressMode === 'context') {
       return s.contextMax > 0 ? (s.contextUsed / s.contextMax) * 100 : 0;
     }
-    const threshold = s.contextMax * s.autocompactPct / 100;
+    const threshold = s.autoCompactActive ? s.compactThreshold : s.effectiveWindow;
     return threshold > 0 ? (s.contextUsed / threshold) * 100 : 0;
   }
 

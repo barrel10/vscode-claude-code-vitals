@@ -18,8 +18,16 @@ export interface Usage {
 export interface ClaudeSettings {
   maxTokensOverride: number | null;
   autocompactPct: number;
+  pctOverride?: number | null;
   contextWindowOverride: number | null;
   cleanupPeriodDays: number;
+  autoCompactWindowEnv?: number | null;
+  maxOutputTokensEnv?: number | null;
+  disableCompact?: boolean;
+  disableAutoCompact?: boolean;
+  claudeCodeRemote?: boolean;
+  redwood2AutoCompactWindow?: number | null;
+  redwood3?: boolean;
 }
 
 export type SessionStatus = 'thinking' | 'waiting' | 'idle' | 'inactive';
@@ -82,6 +90,12 @@ export interface SessionInfo {
   messageCount: number;
   autocompactPct: number;
   tokensUntilCompact: number;
+  autoCompactActive: boolean;
+  autoCompactSource: AutoCompactSource;
+  autoCompactWindow: number;
+  effectiveWindow: number;
+  compactThreshold: number;
+  outputReserve: number;
   mtimeMs: number;
   displayMtimeMs: number;
   fileSize: number;
@@ -113,17 +127,44 @@ export interface SessionInfo {
   tasksMtimeMs: number;
   /** @internal subagent dir max mtime for cache invalidation */
   subagentMtimeMs: number;
+  /** @internal settings fingerprint for cache invalidation */
+  settingsCacheKey: string;
 }
 
 export type SortMode = 'time' | 'usage' | 'compact';
 export type FilterMode = 'all' | 'warning' | 'critical';
 export type ModelFilter = 'all' | 'opus' | 'sonnet' | 'haiku';
 export type GroupMode = 'none' | 'project' | 'status' | 'custom';
+export type AutoCompactSource = 'env' | 'settings' | 'default';
+
+export interface AutoCompactSettings {
+  pctOverride?: number;
+  autoCompactWindowEnv?: number;
+  autoCompactWindowSettings?: number;
+  maxOutputTokensEnv?: number;
+  disableCompact?: boolean;
+  disableAutoCompact?: boolean;
+  claudeCodeRemote?: boolean;
+  redwood3?: boolean;
+}
+
+export interface AutoCompactInfo {
+  active: boolean;
+  source: AutoCompactSource;
+  window: number;
+  effectiveWindow: number;
+  compactThreshold: number;
+  outputReserve: number;
+}
 
 // ─── Constants ───
 
 const TASKS_DIR_BASE = path.join(os.tmpdir(), 'claude');
 const DEFAULT_CONTEXT_SIZE = 200000;
+const OUTPUT_RESERVE_CAP = 20_000;
+const MIN_AUTO_COMPACT_WINDOW = 100_000;
+const MAX_AUTO_COMPACT_WINDOW = 1_000_000;
+const COMPACT_BUFFER = 13_000;
 
 const SKIP_PREFIXES = [
   'This session is being continued',
@@ -134,27 +175,83 @@ const SKIP_PREFIXES = [
 
 // ─── Helpers ───
 
+function parsePositiveNumber(value: unknown): number | null {
+  if (typeof value === 'number' && isFinite(value) && value > 0) { return value; }
+  if (typeof value === 'string' && value.trim()) {
+    const n = parseFloat(value);
+    if (isFinite(n) && n > 0) { return n; }
+  }
+  return null;
+}
+
+function parsePctOverride(value: unknown): number | null {
+  const n = parsePositiveNumber(value);
+  return n !== null && n <= 100 ? n : null;
+}
+
+function envTruthy(value: unknown): boolean {
+  if (typeof value === 'boolean') { return value; }
+  if (typeof value === 'number') { return value !== 0; }
+  if (typeof value !== 'string') { return false; }
+  const normalized = value.trim().toLowerCase();
+  return normalized !== '' && normalized !== '0' && normalized !== 'false' && normalized !== 'no' && normalized !== 'off';
+}
+
+function envValue(name: string, settingsEnv: Record<string, unknown>): unknown {
+  return process.env[name] ?? settingsEnv[name];
+}
+
+function getSettingsCacheKey(settings: ClaudeSettings): string {
+  return JSON.stringify({
+    maxTokensOverride: settings.maxTokensOverride,
+    autocompactPct: settings.autocompactPct,
+    pctOverride: settings.pctOverride ?? null,
+    contextWindowOverride: settings.contextWindowOverride,
+    autoCompactWindowEnv: settings.autoCompactWindowEnv ?? null,
+    maxOutputTokensEnv: settings.maxOutputTokensEnv ?? null,
+    disableCompact: !!settings.disableCompact,
+    disableAutoCompact: !!settings.disableAutoCompact,
+    claudeCodeRemote: !!settings.claudeCodeRemote,
+    redwood2AutoCompactWindow: settings.redwood2AutoCompactWindow ?? null,
+    redwood3: !!settings.redwood3,
+  });
+}
+
 export function readClaudeSettings(): ClaudeSettings {
   let maxTokensOverride: number | null = null;
   let autocompactPct = 95;
   let contextWindowOverride: number | null = null;
   let cleanupPeriodDays = 30;
+  let autoCompactWindowEnv: number | null = null;
+  let maxOutputTokensEnv: number | null = null;
+  let disableCompact = false;
+  let disableAutoCompact = false;
+  let claudeCodeRemote = false;
+  let redwood2AutoCompactWindow: number | null = null;
+  let redwood3 = false;
+  let settingsEnv: Record<string, unknown> = {};
   try {
     const settings = JSON.parse(
       fs.readFileSync(path.join(os.homedir(), '.claude', 'settings.json'), 'utf8')
     );
+    if (settings?.env && typeof settings.env === 'object') {
+      settingsEnv = settings.env;
+    }
     if (settings?.maxTokens && typeof settings.maxTokens === 'number') {
       maxTokensOverride = settings.maxTokens;
-    }
-    const override = settings?.env?.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE;
-    if (override) {
-      const n = parseInt(override, 10);
-      if (!isNaN(n)) { autocompactPct = n; }
     }
     if (typeof settings?.cleanupPeriodDays === 'number' && Number.isFinite(settings.cleanupPeriodDays) && settings.cleanupPeriodDays > 0) {
       cleanupPeriodDays = Math.floor(settings.cleanupPeriodDays);
     }
   } catch { /* ignore */ }
+
+  const pctOverride = parsePctOverride(envValue('CLAUDE_AUTOCOMPACT_PCT_OVERRIDE', settingsEnv));
+  if (pctOverride !== null) { autocompactPct = pctOverride; }
+  autoCompactWindowEnv = parsePositiveNumber(envValue('CLAUDE_CODE_AUTO_COMPACT_WINDOW', settingsEnv));
+  maxOutputTokensEnv = parsePositiveNumber(envValue('CLAUDE_CODE_MAX_OUTPUT_TOKENS', settingsEnv));
+  disableCompact = envTruthy(envValue('DISABLE_COMPACT', settingsEnv));
+  disableAutoCompact = envTruthy(envValue('DISABLE_AUTO_COMPACT', settingsEnv));
+  claudeCodeRemote = envTruthy(envValue('CLAUDE_CODE_REMOTE', settingsEnv));
 
   // Detect context window override from model settings and GrowthBook feature flag.
   // Priority: settings.local.json model [1m] > settings.json model [1m] > GrowthBook flag
@@ -181,7 +278,8 @@ export function readClaudeSettings(): ClaudeSettings {
         const claudeJson = JSON.parse(
           fs.readFileSync(path.join(os.homedir(), '.claude.json'), 'utf8')
         );
-        const hw = claudeJson?.cachedGrowthBookFeatures?.tengu_hawthorn_window;
+        const features = claudeJson?.cachedGrowthBookFeatures;
+        const hw = features?.tengu_hawthorn_window;
         if (typeof hw === 'number' && hw > 0) {
           contextWindowOverride = hw;
         }
@@ -189,7 +287,22 @@ export function readClaudeSettings(): ClaudeSettings {
     }
   }
 
-  return { maxTokensOverride, autocompactPct, contextWindowOverride, cleanupPeriodDays };
+  try {
+    const claudeJson = JSON.parse(
+      fs.readFileSync(path.join(os.homedir(), '.claude.json'), 'utf8')
+    );
+    const features = claudeJson?.cachedGrowthBookFeatures;
+    redwood2AutoCompactWindow = parsePositiveNumber(features?.tengu_amber_redwood2);
+    redwood3 = envTruthy(features?.tengu_amber_redwood3);
+  } catch { /* ignore */ }
+
+  return {
+    maxTokensOverride, autocompactPct, pctOverride, contextWindowOverride,
+    cleanupPeriodDays,
+    autoCompactWindowEnv, maxOutputTokensEnv,
+    disableCompact, disableAutoCompact, claudeCodeRemote,
+    redwood2AutoCompactWindow, redwood3,
+  };
 }
 
 // Model info: base context size and whether the model supports extended (1M) context.
@@ -203,6 +316,7 @@ interface ModelInfo {
 }
 
 const MODEL_INFO: Record<string, ModelInfo> = {
+  'claude-opus-4-8':   { contextSize: 200_000, supportsExtended: true },
   'claude-opus-4-7':   { contextSize: 200_000, supportsExtended: true },
   'claude-opus-4-6':   { contextSize: 200_000, supportsExtended: true },
   'claude-sonnet-4-6': { contextSize: 200_000, supportsExtended: true },
@@ -246,6 +360,64 @@ function normalizeModelId(model: string): string {
 
 function lookupPricing(model: string): ModelPricing | undefined {
   return MODEL_PRICING[normalizeModelId(model)] ?? MODEL_PRICING[shortenModel(model)];
+}
+
+function clampNumber(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
+}
+
+function getDefaultMaxOutputTokens(model: string): number {
+  const normalized = normalizeModelId(model);
+  if (
+    normalized === 'claude-opus-4-8' ||
+    normalized === 'claude-opus-4-7' ||
+    normalized === 'claude-opus-4-6'
+  ) {
+    return 64_000;
+  }
+  return 32_000;
+}
+
+export function computeAutoCompact(
+  model: string,
+  contextMax: number,
+  settings: AutoCompactSettings = {},
+): AutoCompactInfo {
+  const modelMaxWindow = Math.max(1, contextMax);
+  let source: AutoCompactSource = 'default';
+  let window = modelMaxWindow;
+
+  if (settings.autoCompactWindowEnv !== undefined) {
+    const envWindow = parsePositiveNumber(settings.autoCompactWindowEnv);
+    if (envWindow !== null) {
+      window = Math.min(modelMaxWindow, clampNumber(envWindow, MIN_AUTO_COMPACT_WINDOW, MAX_AUTO_COMPACT_WINDOW));
+      source = 'env';
+    }
+  }
+
+  if (source === 'default' && settings.autoCompactWindowSettings !== undefined) {
+    const settingsWindow = parsePositiveNumber(settings.autoCompactWindowSettings);
+    if (settingsWindow !== null) {
+      window = Math.min(modelMaxWindow, settingsWindow);
+      source = 'settings';
+    }
+  }
+
+  const maxOutputTokens = parsePositiveNumber(settings.maxOutputTokensEnv) ?? getDefaultMaxOutputTokens(model);
+  const outputReserve = Math.min(maxOutputTokens, OUTPUT_RESERVE_CAP);
+  const effectiveWindow = Math.max(1, window - outputReserve);
+  const pct = parsePctOverride(settings.pctOverride);
+  const compactCeiling = Math.max(1, effectiveWindow - COMPACT_BUFFER);
+  const compactThreshold = pct !== null
+    ? Math.max(1, Math.min(Math.floor(effectiveWindow * pct / 100), compactCeiling))
+    : compactCeiling;
+
+  const autoCompactEnabled = !settings.disableCompact && !settings.disableAutoCompact;
+  const local = !settings.claudeCodeRemote;
+  const hasConfiguredWindow = source === 'env' || source === 'settings';
+  const active = !!autoCompactEnabled && (!local || !!settings.redwood3 || hasConfiguredWindow);
+
+  return { active, source, window, effectiveWindow, compactThreshold, outputReserve };
 }
 
 export function getContextMaxForModel(model: string): number {
@@ -410,7 +582,14 @@ function getSubagentMaxMtime(sessionFilePath: string): number {
 /** Parse subagent JSONL files for usage accumulation and agent tracking.
  *  Since Claude Code ~2.1.89, agent_progress entries are no longer written to the main JSONL.
  *  Agent data is now in separate subagent JSONL files under {sessionDir}/{sessionId}/subagents/. */
-function parseSubagentUsage(sessionFilePath: string): SubagentSummary {
+function shouldCountMessageUsage(messageId: unknown, countedMessageIds: Set<string>): boolean {
+  if (typeof messageId !== 'string' || !messageId) { return true; }
+  if (countedMessageIds.has(messageId)) { return false; }
+  countedMessageIds.add(messageId);
+  return true;
+}
+
+function parseSubagentUsage(sessionFilePath: string, countedMessageIds: Set<string>): SubagentSummary {
   const result: SubagentSummary = {
     maxMtimeMs: 0, count: 0, timestamps: [],
     input: 0, cacheRead: 0, cacheCreation: 0, output: 0,
@@ -432,6 +611,7 @@ function parseSubagentUsage(sessionFilePath: string): SubagentSummary {
           try {
             const data = JSON.parse(line);
             if (data.type === 'assistant' && data.message?.usage) {
+              if (!shouldCountMessageUsage(data.message.id, countedMessageIds)) { continue; }
               const u = data.message.usage;
               result.input += u.input_tokens || 0;
               result.cacheRead += u.cache_read_input_tokens || 0;
@@ -500,6 +680,7 @@ function isSkippableText(text: string): boolean {
 function parseSessionJsonl(
   filePath: string,
   settings: ClaudeSettings,
+  settingsCacheKey: string,
   mtimeMs: number,
   fileSize: number,
   projectDir: string,
@@ -533,6 +714,7 @@ function parseSessionJsonl(
     let lastAssistantIdx = -1;
     let lastStopReason = '';
     let lineIdx = 0;
+    const countedMessageIds = new Set<string>();
     for (const line of lines) {
       if (!line.trim()) { lineIdx++; continue; }
       try {
@@ -551,18 +733,21 @@ function parseSessionJsonl(
         if (data.type === 'assistant' && data.message?.usage) {
           lastUsage = data.message.usage;
           lastModel = data.message.model || lastModel;
-          totalInput += data.message.usage.input_tokens || 0;
-          totalCacheRead += data.message.usage.cache_read_input_tokens || 0;
-          totalCacheCreation += data.message.usage.cache_creation_input_tokens || 0;
-          totalOutput += data.message.usage.output_tokens || 0;
-          // Cache write breakdown: track separately for accurate cost calculation
-          const e5m = data.message.usage.cache_creation?.ephemeral_5m_input_tokens || 0;
-          const e1h = data.message.usage.cache_creation?.ephemeral_1h_input_tokens || 0;
-          if (e5m > 0 || e1h > 0) {
-            totalCacheWrite5m += e5m;
-            totalCacheWrite1h += e1h;
-          } else {
-            totalCacheWriteNoBreakdown += data.message.usage.cache_creation_input_tokens || 0;
+          const countUsage = shouldCountMessageUsage(data.message.id, countedMessageIds);
+          if (countUsage) {
+            totalInput += data.message.usage.input_tokens || 0;
+            totalCacheRead += data.message.usage.cache_read_input_tokens || 0;
+            totalCacheCreation += data.message.usage.cache_creation_input_tokens || 0;
+            totalOutput += data.message.usage.output_tokens || 0;
+            // Cache write breakdown: track separately for accurate cost calculation
+            const e5m = data.message.usage.cache_creation?.ephemeral_5m_input_tokens || 0;
+            const e1h = data.message.usage.cache_creation?.ephemeral_1h_input_tokens || 0;
+            if (e5m > 0 || e1h > 0) {
+              totalCacheWrite5m += e5m;
+              totalCacheWrite1h += e1h;
+            } else {
+              totalCacheWriteNoBreakdown += data.message.usage.cache_creation_input_tokens || 0;
+            }
           }
           // Compact detection: heuristic fallback for older Claude Code versions without compact_boundary
           const ctx = (data.message.usage.input_tokens || 0) +
@@ -577,7 +762,7 @@ function parseSessionJsonl(
             prevContext = ctx;
             compactBoundaryPending = false;
           }
-          assistantCount++;
+          if (countUsage) { assistantCount++; }
         }
         // Compact detection: explicit compact_boundary system entry (authoritative)
         if (data.type === 'system' && data.subtype === 'compact_boundary') {
@@ -593,17 +778,20 @@ function parseSessionJsonl(
           agentLastSeen.set(data.data.agentId, ts);
           const agentUsage = data.data?.message?.message?.usage;
           if (agentUsage) {
-            totalInput += agentUsage.input_tokens || 0;
-            totalCacheRead += agentUsage.cache_read_input_tokens || 0;
-            totalCacheCreation += agentUsage.cache_creation_input_tokens || 0;
-            totalOutput += agentUsage.output_tokens || 0;
-            const ae5m = agentUsage.cache_creation?.ephemeral_5m_input_tokens || 0;
-            const ae1h = agentUsage.cache_creation?.ephemeral_1h_input_tokens || 0;
-            if (ae5m > 0 || ae1h > 0) {
-              totalCacheWrite5m += ae5m;
-              totalCacheWrite1h += ae1h;
-            } else {
-              totalCacheWriteNoBreakdown += agentUsage.cache_creation_input_tokens || 0;
+            const agentMessageId = data.data?.message?.message?.id;
+            if (shouldCountMessageUsage(agentMessageId, countedMessageIds)) {
+              totalInput += agentUsage.input_tokens || 0;
+              totalCacheRead += agentUsage.cache_read_input_tokens || 0;
+              totalCacheCreation += agentUsage.cache_creation_input_tokens || 0;
+              totalOutput += agentUsage.output_tokens || 0;
+              const ae5m = agentUsage.cache_creation?.ephemeral_5m_input_tokens || 0;
+              const ae1h = agentUsage.cache_creation?.ephemeral_1h_input_tokens || 0;
+              if (ae5m > 0 || ae1h > 0) {
+                totalCacheWrite5m += ae5m;
+                totalCacheWrite1h += ae1h;
+              } else {
+                totalCacheWriteNoBreakdown += agentUsage.cache_creation_input_tokens || 0;
+              }
             }
           }
         }
@@ -623,7 +811,7 @@ function parseSessionJsonl(
 
     // Subagent usage: parse subagent JSONL files directly (new format, ~2.1.89+)
     // Falls back gracefully if no subagent dir exists or if legacy progress entries were found
-    const subagent = parseSubagentUsage(filePath);
+    const subagent = parseSubagentUsage(filePath, countedMessageIds);
     if (agentIds.size === 0 && subagent.count > 0) {
       // New format: no progress entries in main JSONL, agent data in subagent files
       totalInput += subagent.input;
@@ -646,8 +834,22 @@ function parseSessionJsonl(
       ?? explicit1m
       ?? (isExtendedContextModel(lastModel) ? settings.contextWindowOverride : null)
       ?? getContextMaxForModel(lastModel);
-    const compactThreshold = Math.max(1, Math.floor(contextMax * settings.autocompactPct / 100));
-    const usagePercent = (contextUsed / compactThreshold) * 100;
+    const autoCompactWindowSettings = normalizeModelId(lastModel) === 'claude-opus-4-8'
+      ? settings.redwood2AutoCompactWindow
+      : null;
+    const autoCompact = computeAutoCompact(lastModel, contextMax, {
+      pctOverride: settings.pctOverride ?? undefined,
+      autoCompactWindowEnv: settings.autoCompactWindowEnv ?? undefined,
+      autoCompactWindowSettings: autoCompactWindowSettings ?? undefined,
+      maxOutputTokensEnv: settings.maxOutputTokensEnv ?? undefined,
+      disableCompact: settings.disableCompact,
+      disableAutoCompact: settings.disableAutoCompact,
+      claudeCodeRemote: settings.claudeCodeRemote,
+      redwood3: settings.redwood3,
+    });
+    const compactThreshold = autoCompact.compactThreshold;
+    const usageBase = autoCompact.active ? compactThreshold : autoCompact.effectiveWindow;
+    const usagePercent = (contextUsed / usageBase) * 100;
     const tokensUntilCompact = Math.max(0, compactThreshold - contextUsed);
 
     const sessionName = customTitle
@@ -671,6 +873,12 @@ function parseSessionJsonl(
       contextUsed, contextMax, usagePercent,
       messageCount: assistantCount,
       autocompactPct: settings.autocompactPct, tokensUntilCompact,
+      autoCompactActive: autoCompact.active,
+      autoCompactSource: autoCompact.source,
+      autoCompactWindow: autoCompact.window,
+      effectiveWindow: autoCompact.effectiveWindow,
+      compactThreshold,
+      outputReserve: autoCompact.outputReserve,
       mtimeMs, displayMtimeMs: effectiveMtime, fileSize, filePath,
       projectDir, projectLabel,
       isActiveTurn, lastStopReason,
@@ -682,6 +890,7 @@ function parseSessionJsonl(
       activeAgentCount, totalAgentCount, _agentTimestamps: agentTimestamps,
       tasksMtimeMs: tasksMtime,
       subagentMtimeMs: subagent.maxMtimeMs,
+      settingsCacheKey,
     };
   } catch { return null; }
 }
@@ -703,6 +912,7 @@ export function findAllSessionsCached(
   const sessions: SessionInfo[] = [];
   const now = Date.now();
   const seenPaths = new Set<string>();
+  const settingsCacheKey = getSettingsCacheKey(settings);
 
   try {
     for (const dirent of fs.readdirSync(projectsDir, { withFileTypes: true })) {
@@ -733,7 +943,13 @@ export function findAllSessionsCached(
 
           const cached = sessionCache.get(filePath);
           const subagentChanged = cached ? subagentMtime !== cached.subagentMtimeMs : false;
-          if (cached && cached.mtimeMs === mtime && cached.fileSize === size && !subagentChanged) {
+          if (
+            cached &&
+            cached.mtimeMs === mtime &&
+            cached.fileSize === size &&
+            cached.settingsCacheKey === settingsCacheKey &&
+            !subagentChanged
+          ) {
             const activityChanged = tasksMtime !== cached.tasksMtimeMs;
             cached.tasksMtimeMs = tasksMtime;
             cached.status = getSessionStatus(effectiveMtime, mtime, cached.isActiveTurn, activityChanged, cached.sessionId);
@@ -748,7 +964,7 @@ export function findAllSessionsCached(
             continue;
           }
 
-          const info = parseSessionJsonl(filePath, settings, mtime, size, projectDir, projectLabel);
+          const info = parseSessionJsonl(filePath, settings, settingsCacheKey, mtime, size, projectDir, projectLabel);
           if (info) {
             sessionCache.set(filePath, info);
             sessions.push(info);
