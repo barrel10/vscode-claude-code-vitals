@@ -718,6 +718,7 @@ export class OverviewTreeProvider implements vscode.TreeDataProvider<vscode.Tree
     maxTokensOverride: null,
     autocompactPct: 95,
     contextWindowOverride: null,
+    settingsModelNormalized: null,
     cleanupPeriodDays: 30,
   };
 

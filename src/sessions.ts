@@ -19,6 +19,7 @@ export interface ClaudeSettings {
   maxTokensOverride: number | null;
   autocompactPct: number;
   contextWindowOverride: number | null;
+  settingsModelNormalized: string | null;
   cleanupPeriodDays: number;
   autoCompactWindow?: number | null;
   autoCompactEnabled?: boolean;
@@ -202,6 +203,7 @@ function getSettingsCacheKey(settings: ClaudeSettings): string {
     maxTokensOverride: settings.maxTokensOverride,
     autocompactPct: settings.autocompactPct,
     contextWindowOverride: settings.contextWindowOverride,
+    settingsModelNormalized: settings.settingsModelNormalized,
     autoCompactWindow: settings.autoCompactWindow ?? null,
     autoCompactEnabled: settings.autoCompactEnabled !== false,
     autoCompactWindowEnv: settings.autoCompactWindowEnv ?? null,
@@ -256,6 +258,11 @@ export function readClaudeSettings(): ClaudeSettings {
 
   // Detect context window override from model settings and GrowthBook feature flag.
   // Priority: settings.local.json model [1m] > settings.json model [1m] > GrowthBook flag
+  // settingsModelNormalized tracks which model the [1m] was configured for, so that
+  // contextWindowOverride is only applied to sessions running that same model family.
+  // GrowthBook overrides (no specific model) leave settingsModelNormalized null and
+  // apply to all extended-context models.
+  let settingsModelNormalized: string | null = null;
   if (contextWindowOverride === null) {
     const re1m = /[\[(]1[mM][\])]/;
     const localSettingsPath = path.join(os.homedir(), '.claude', 'settings.local.json');
@@ -264,6 +271,7 @@ export function readClaudeSettings(): ClaudeSettings {
       const local = JSON.parse(fs.readFileSync(localSettingsPath, 'utf8'));
       if (typeof local?.model === 'string' && re1m.test(local.model)) {
         contextWindowOverride = 1_000_000;
+        settingsModelNormalized = normalizeModelId(local.model);
       }
     } catch { /* ignore */ }
     if (contextWindowOverride === null) {
@@ -271,6 +279,7 @@ export function readClaudeSettings(): ClaudeSettings {
         const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
         if (typeof settings?.model === 'string' && re1m.test(settings.model)) {
           contextWindowOverride = 1_000_000;
+          settingsModelNormalized = normalizeModelId(settings.model);
         }
       } catch { /* ignore */ }
     }
@@ -299,6 +308,7 @@ export function readClaudeSettings(): ClaudeSettings {
 
   return {
     maxTokensOverride, autocompactPct, contextWindowOverride,
+    settingsModelNormalized,
     cleanupPeriodDays,
     autoCompactWindow, autoCompactEnabled,
     autoCompactWindowEnv, maxOutputTokensEnv,
@@ -307,9 +317,14 @@ export function readClaudeSettings(): ClaudeSettings {
   };
 }
 
-// Model info: base context size and whether the model supports extended (1M) context.
-// The base context is the default without [1m] suffix; extended context requires
-// the [1m] suffix which triggers the API beta header context-1m-2025-08-07.
+// Model info: base context size (without [1m]) and whether the model supports
+// extended (1M) context via the [1m] suffix (which triggers the API beta header
+// context-1m-2025-08-07). The base size is the conservative default used when no
+// session-level 1M signal is present; per-session promotion to 1M happens in
+// parseSessionJsonl via explicit [1m] / evidenced usage / matching settings model.
+// opus-4-8/4-7 may auto-upgrade to 1M on the first-party API without [1m], but that
+// is not encoded as a default here: assuming 1M for a 200K-capped environment would
+// hide real compact pressure, whereas a conservative 200K default only over-warns.
 // Aliases (opus/sonnet/haiku) map to the current default version.
 // (2026-04-17 verified against docs.anthropic.com)
 interface ModelInfo {
@@ -357,7 +372,9 @@ const MODEL_PRICING: Record<string, ModelPricing> = {
 };
 
 function normalizeModelId(model: string): string {
-  return model.replace(/[\[(]1[mM][\])]$/, '').replace(/-\d{8}$/, '');
+  // Strip an optional [1m]/(1m) suffix (with any leading whitespace, e.g. "opus [1m]")
+  // and a trailing -YYYYMMDD date stamp, then trim so model-id comparisons are exact.
+  return model.trim().replace(/\s*[\[(]1[mM][\])]$/, '').replace(/-\d{8}$/, '').trim();
 }
 
 function lookupPricing(model: string): ModelPricing | undefined {
@@ -429,6 +446,15 @@ export function getContextMaxForModel(model: string): number {
 export function isExtendedContextModel(model: string): boolean {
   const normalized = normalizeModelId(model);
   return MODEL_INFO[normalized]?.supportsExtended ?? false;
+}
+
+function settingsModelsMatch(sessionModel: string, settingsModel: string): boolean {
+  const sNorm = normalizeModelId(sessionModel);
+  const tNorm = normalizeModelId(settingsModel);
+  if (sNorm === tNorm) { return true; }
+  // Alias matching: settings "opus" matches session "claude-opus-4-8", etc.
+  if (shortenModel(sNorm) === tNorm || sNorm === shortenModel(tNorm)) { return true; }
+  return false;
 }
 
 export function formatTokens(n: number): string {
@@ -701,6 +727,8 @@ function parseSessionJsonl(
     let compactManualCount = 0;
     let lastCompactFreed = 0;
     let prevContext = 0;
+    let maxContextSeen = 0;
+    let hasCompactAbove200K = false;
     let compactBoundaryPending = false;
     const agentIds = new Set<string>();
     const agentLastSeen = new Map<string, number>();
@@ -753,6 +781,7 @@ function parseSessionJsonl(
                       (data.message.usage.cache_creation_input_tokens || 0) +
                       (data.message.usage.cache_read_input_tokens || 0);
           if (ctx > 0) {
+            if (ctx > maxContextSeen) { maxContextSeen = ctx; }
             if (prevContext > 20000 && ctx < prevContext * 0.7 && !compactBoundaryPending) {
               compactCount++;
               compactAutoCount++; // heuristic-detected compacts are assumed auto
@@ -767,7 +796,9 @@ function parseSessionJsonl(
         if (data.type === 'system' && data.subtype === 'compact_boundary') {
           compactCount++;
           if (data.compactMetadata?.trigger === 'manual') { compactManualCount++; } else { compactAutoCount++; }
-          lastCompactFreed = data.compactMetadata?.preTokens || 0;
+          const preTokens = data.compactMetadata?.preTokens || 0;
+          lastCompactFreed = preTokens;
+          if (preTokens > DEFAULT_CONTEXT_SIZE) { hasCompactAbove200K = true; }
           compactBoundaryPending = true; // suppress next heuristic drop
         }
         // Agent activity detection (legacy: progress entries in main JSONL, pre ~2.1.89)
@@ -829,9 +860,23 @@ function parseSessionJsonl(
     const cacheCreationTokens = lastUsage.cache_creation_input_tokens || 0;
     const contextUsed = inputTokens + cacheCreationTokens + cacheReadTokens;
     const explicit1m = /[\[(]1[mM][\])]$/.test(lastModel) ? 1_000_000 : null;
+    // Evidence-based 1M: session held >200K tokens at some point (current peak or pre-compact).
+    // This is the strongest per-session signal — a window that actually exceeded the 200K base
+    // must be extended. It only promotes upward, so it never hides compact pressure.
+    const evidenced1m = (maxContextSeen > DEFAULT_CONTEXT_SIZE || hasCompactAbove200K) ? 1_000_000 : null;
+    // Settings-based 1M: weaker than evidenced (reflects the CURRENT settings model, not the
+    // model in effect when this session was created). Applied only when the session's model
+    // matches the settings model carrying [1m], or when contextWindowOverride comes from
+    // GrowthBook (settingsModelNormalized is null → environment-wide, no specific model).
+    const settingsMatch1m = (settings.contextWindowOverride !== null
+      && isExtendedContextModel(lastModel)
+      && (settings.settingsModelNormalized === null
+          || settingsModelsMatch(lastModel, settings.settingsModelNormalized)))
+      ? settings.contextWindowOverride : null;
     const contextMax = settings.maxTokensOverride
       ?? explicit1m
-      ?? (isExtendedContextModel(lastModel) ? settings.contextWindowOverride : null)
+      ?? evidenced1m
+      ?? settingsMatch1m
       ?? getContextMaxForModel(lastModel);
     const autoCompactWindowSettings = settings.autoCompactWindow ?? (normalizeModelId(lastModel) === 'claude-opus-4-8'
       ? settings.redwood2AutoCompactWindow

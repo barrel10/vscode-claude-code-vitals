@@ -66,6 +66,7 @@ export function activate(context: vscode.ExtensionContext) {
     maxTokensOverride: null,
     autocompactPct: 0,
     contextWindowOverride: null,
+    settingsModelNormalized: null,
     cleanupPeriodDays: 30,
     autoCompactWindow: null,
     autoCompactEnabled: true,
@@ -104,6 +105,7 @@ export function activate(context: vscode.ExtensionContext) {
       settings.maxTokensOverride !== lastSettings.maxTokensOverride ||
       settings.autocompactPct !== lastSettings.autocompactPct ||
       settings.contextWindowOverride !== lastSettings.contextWindowOverride ||
+      settings.settingsModelNormalized !== lastSettings.settingsModelNormalized ||
       settings.cleanupPeriodDays !== lastSettings.cleanupPeriodDays ||
       settings.autoCompactWindow !== lastSettings.autoCompactWindow ||
       settings.autoCompactEnabled !== lastSettings.autoCompactEnabled ||

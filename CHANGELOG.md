@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.5.2 (2026-06-05)
+
+### Fixed
+- The context window size is now determined per session from its own model, instead of applying a global `[1m]` setting to every session. Previously, configuring `[1m]` for one model (for example Opus) could make unrelated sessions (such as Sonnet) display a 1M context bar. A session now shows 1M only when its own model warrants it: an explicit `[1m]` suffix, evidenced usage above 200K, or a `[1m]` settings model that matches the session's model
+
 ## 1.5.1 (2026-05-30)
 
 ### Fixed
