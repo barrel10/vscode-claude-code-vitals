@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.5.3 (2026-06-05)
+
+### Performance
+- Reduced VS Code UI freezes during long work sessions. Large session logs are now processed incrementally, lowering refresh overhead for sessions with large transcripts
+
 ## 1.5.2 (2026-06-05)
 
 ### Fixed

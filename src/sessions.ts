@@ -133,6 +133,43 @@ export interface SessionInfo {
   settingsCacheKey: string;
 }
 
+interface SessionParseState {
+  _byteOffset: number;
+  lastUsage: Usage | null;
+  lastModel: string;
+  totalInput: number;
+  totalCacheRead: number;
+  totalCacheCreation: number;
+  totalOutput: number;
+  totalCacheWrite5m: number;
+  totalCacheWrite1h: number;
+  totalCacheWriteNoBreakdown: number;
+  compactCount: number;
+  compactAutoCount: number;
+  compactManualCount: number;
+  lastCompactFreed: number;
+  prevContext: number;
+  maxContextSeen: number;
+  hasCompactAbove200K: boolean;
+  compactBoundaryPending: boolean;
+  agentIds: Set<string>;
+  agentLastSeen: Map<string, number>;
+  assistantCount: number;
+  sessionId: string;
+  firstUserText: string;
+  aiTitle: string;
+  customTitle: string;
+  lastUserIdx: number;
+  lastAssistantIdx: number;
+  lastStopReason: string;
+  lineIdx: number;
+  countedMessageIds: Set<string>;
+}
+
+interface CachedSessionInfo extends SessionInfo {
+  _parseState?: SessionParseState;
+}
+
 export type SortMode = 'time' | 'usage' | 'compact';
 export type FilterMode = 'all' | 'warning' | 'critical';
 export type ModelFilter = 'all' | 'opus' | 'sonnet' | 'haiku';
@@ -198,7 +235,7 @@ function envValue(name: string, settingsEnv: Record<string, unknown>): unknown {
   return process.env[name] ?? settingsEnv[name];
 }
 
-function getSettingsCacheKey(settings: ClaudeSettings): string {
+export function getSettingsCacheKey(settings: ClaudeSettings): string {
   return JSON.stringify({
     maxTokensOverride: settings.maxTokensOverride,
     autocompactPct: settings.autocompactPct,
@@ -702,7 +739,199 @@ function isSkippableText(text: string): boolean {
   return SKIP_PREFIXES.some(prefix => text.startsWith(prefix));
 }
 
-function parseSessionJsonl(
+function createEmptyParseState(): SessionParseState {
+  return {
+    _byteOffset: 0,
+    lastUsage: null,
+    lastModel: '',
+    totalInput: 0,
+    totalCacheRead: 0,
+    totalCacheCreation: 0,
+    totalOutput: 0,
+    totalCacheWrite5m: 0,
+    totalCacheWrite1h: 0,
+    totalCacheWriteNoBreakdown: 0,
+    compactCount: 0,
+    compactAutoCount: 0,
+    compactManualCount: 0,
+    lastCompactFreed: 0,
+    prevContext: 0,
+    maxContextSeen: 0,
+    hasCompactAbove200K: false,
+    compactBoundaryPending: false,
+    agentIds: new Set<string>(),
+    agentLastSeen: new Map<string, number>(),
+    assistantCount: 0,
+    sessionId: '',
+    firstUserText: '',
+    aiTitle: '',
+    customTitle: '',
+    lastUserIdx: -1,
+    lastAssistantIdx: -1,
+    lastStopReason: '',
+    lineIdx: 0,
+    countedMessageIds: new Set<string>(),
+  };
+}
+
+function cloneParseState(state: SessionParseState): SessionParseState {
+  return {
+    ...state,
+    agentIds: new Set(state.agentIds),
+    agentLastSeen: new Map(state.agentLastSeen),
+    countedMessageIds: new Set(state.countedMessageIds),
+  };
+}
+
+function processSessionLine(line: string, state: SessionParseState): void {
+  if (!line.trim()) { state.lineIdx++; return; }
+  try {
+    const data = JSON.parse(line);
+    if (data.type === 'user') { state.lastUserIdx = state.lineIdx; }
+    if (data.type === 'assistant') {
+      state.lastAssistantIdx = state.lineIdx;
+      if (data.message?.stop_reason) { state.lastStopReason = data.message.stop_reason; }
+    }
+    if (data.sessionId && !state.sessionId) { state.sessionId = data.sessionId; }
+    if (data.type === 'custom-title' && data.customTitle) {
+      state.customTitle = data.customTitle;
+    } else if (data.type === 'ai-title' && data.aiTitle) {
+      state.aiTitle = data.aiTitle;
+    }
+    if (data.type === 'assistant' && data.message?.usage) {
+      state.lastUsage = data.message.usage;
+      state.lastModel = data.message.model || state.lastModel;
+      const countUsage = shouldCountMessageUsage(data.message.id, state.countedMessageIds);
+      if (countUsage) {
+        state.totalInput += data.message.usage.input_tokens || 0;
+        state.totalCacheRead += data.message.usage.cache_read_input_tokens || 0;
+        state.totalCacheCreation += data.message.usage.cache_creation_input_tokens || 0;
+        state.totalOutput += data.message.usage.output_tokens || 0;
+        const e5m = data.message.usage.cache_creation?.ephemeral_5m_input_tokens || 0;
+        const e1h = data.message.usage.cache_creation?.ephemeral_1h_input_tokens || 0;
+        if (e5m > 0 || e1h > 0) {
+          state.totalCacheWrite5m += e5m;
+          state.totalCacheWrite1h += e1h;
+        } else {
+          state.totalCacheWriteNoBreakdown += data.message.usage.cache_creation_input_tokens || 0;
+        }
+      }
+      const ctx = (data.message.usage.input_tokens || 0) +
+                  (data.message.usage.cache_creation_input_tokens || 0) +
+                  (data.message.usage.cache_read_input_tokens || 0);
+      if (ctx > 0) {
+        if (ctx > state.maxContextSeen) { state.maxContextSeen = ctx; }
+        if (state.prevContext > 20000 && ctx < state.prevContext * 0.7 && !state.compactBoundaryPending) {
+          state.compactCount++;
+          state.compactAutoCount++;
+          state.lastCompactFreed = state.prevContext - ctx;
+        }
+        state.prevContext = ctx;
+        state.compactBoundaryPending = false;
+      }
+      if (countUsage) { state.assistantCount++; }
+    }
+    if (data.type === 'system' && data.subtype === 'compact_boundary') {
+      state.compactCount++;
+      if (data.compactMetadata?.trigger === 'manual') { state.compactManualCount++; } else { state.compactAutoCount++; }
+      const preTokens = data.compactMetadata?.preTokens || 0;
+      state.lastCompactFreed = preTokens;
+      if (preTokens > DEFAULT_CONTEXT_SIZE) { state.hasCompactAbove200K = true; }
+      state.compactBoundaryPending = true;
+    }
+    if (data.type === 'progress' && data.data?.type === 'agent_progress' && data.data?.agentId) {
+      state.agentIds.add(data.data.agentId);
+      const ts = new Date(data.timestamp || 0).getTime();
+      state.agentLastSeen.set(data.data.agentId, ts);
+      const agentUsage = data.data?.message?.message?.usage;
+      if (agentUsage) {
+        const agentMessageId = data.data?.message?.message?.id;
+        if (shouldCountMessageUsage(agentMessageId, state.countedMessageIds)) {
+          state.totalInput += agentUsage.input_tokens || 0;
+          state.totalCacheRead += agentUsage.cache_read_input_tokens || 0;
+          state.totalCacheCreation += agentUsage.cache_creation_input_tokens || 0;
+          state.totalOutput += agentUsage.output_tokens || 0;
+          const ae5m = agentUsage.cache_creation?.ephemeral_5m_input_tokens || 0;
+          const ae1h = agentUsage.cache_creation?.ephemeral_1h_input_tokens || 0;
+          if (ae5m > 0 || ae1h > 0) {
+            state.totalCacheWrite5m += ae5m;
+            state.totalCacheWrite1h += ae1h;
+          } else {
+            state.totalCacheWriteNoBreakdown += agentUsage.cache_creation_input_tokens || 0;
+          }
+        }
+      }
+    }
+    if (!state.firstUserText && data.type === 'user' && data.message?.content) {
+      const text = extractUserText(data.message.content);
+      if (text && !isSkippableText(text)) {
+        state.firstUserText = text;
+      }
+    }
+  } catch { /* skip */ }
+  state.lineIdx++;
+}
+
+function readSessionLines(filePath: string, fileSize: number, state: SessionParseState): boolean {
+  if (fileSize < state._byteOffset) { return false; }
+  if (fileSize === state._byteOffset) { return true; }
+
+  let fd: number | null = null;
+  try {
+    const bytesToRead = fileSize - state._byteOffset;
+    const buffer = Buffer.allocUnsafe(bytesToRead);
+    fd = fs.openSync(filePath, 'r');
+    const bytesRead = fs.readSync(fd, buffer, 0, bytesToRead, state._byteOffset);
+    const chunk = buffer.subarray(0, bytesRead);
+
+    // Find the last newline byte (0x0a) in the raw buffer so that we only decode
+    // complete lines. This avoids corrupt decoding when a UTF-8 multibyte character
+    // is split across two reads.
+    const lastLF = chunk.lastIndexOf(0x0a);
+    const completeBytes = lastLF >= 0 ? lastLF + 1 : 0;
+
+    if (completeBytes > 0) {
+      const completeChunk = chunk.subarray(0, completeBytes).toString('utf8');
+      const lines = completeChunk.split(/\r?\n/);
+      // The split always produces an empty string after the trailing newline; skip it.
+      const limit = lines.length > 0 && lines[lines.length - 1] === '' ? lines.length - 1 : lines.length;
+      for (let i = 0; i < limit; i++) {
+        processSessionLine(lines[i], state);
+      }
+    }
+
+    // Handle trailing bytes after the last LF (file ends without a newline).
+    // Attempt to decode and parse as a complete JSON line. If JSON.parse succeeds,
+    // treat it as a fully written terminal line and advance _byteOffset to fileSize.
+    // If JSON.parse fails (mid-write / split UTF-8), leave it as a pending incomplete
+    // line — _byteOffset advances only to completeBytes, preserving the guard against
+    // split multibyte characters and partial writes.
+    const tail = chunk.subarray(completeBytes);
+    if (tail.length > 0) {
+      const tailStr = tail.toString('utf8');
+      try {
+        JSON.parse(tailStr);
+        // Parse succeeded: complete terminal line — process and consume it fully.
+        processSessionLine(tailStr, state);
+        state._byteOffset = state._byteOffset + completeBytes + tail.length;
+      } catch {
+        // Parse failed: incomplete / mid-write line — do not consume.
+        state._byteOffset += completeBytes;
+      }
+    } else {
+      state._byteOffset += completeBytes;
+    }
+    return true;
+  } catch {
+    return false;
+  } finally {
+    if (fd !== null) {
+      try { fs.closeSync(fd); } catch { /* ignore */ }
+    }
+  }
+}
+
+export function parseSessionJsonl(
   filePath: string,
   settings: ClaudeSettings,
   settingsCacheKey: string,
@@ -710,139 +939,37 @@ function parseSessionJsonl(
   fileSize: number,
   projectDir: string,
   projectLabel: string,
+  tasksMtimeMs?: number,
+  subagentMtimeMs?: number,
+  prevInfo?: SessionInfo,
 ): SessionInfo | null {
   try {
-    const lines = fs.readFileSync(filePath, 'utf8').trim().split('\n');
-    let lastUsage: Usage | null = null;
-    let lastModel = '';
-    let totalInput = 0;
-    let totalCacheRead = 0;
-    let totalCacheCreation = 0;
-    let totalOutput = 0;
-    let totalCacheWrite5m = 0;
-    let totalCacheWrite1h = 0;
-    let totalCacheWriteNoBreakdown = 0;
-    let compactCount = 0;
-    let compactAutoCount = 0;
-    let compactManualCount = 0;
-    let lastCompactFreed = 0;
-    let prevContext = 0;
-    let maxContextSeen = 0;
-    let hasCompactAbove200K = false;
-    let compactBoundaryPending = false;
-    const agentIds = new Set<string>();
-    const agentLastSeen = new Map<string, number>();
-    let assistantCount = 0;
-    let sessionId = '';
-    let firstUserText = '';
-    let aiTitle = '';
-    let customTitle = '';
-    let lastUserIdx = -1;
-    let lastAssistantIdx = -1;
-    let lastStopReason = '';
-    let lineIdx = 0;
-    const countedMessageIds = new Set<string>();
-    for (const line of lines) {
-      if (!line.trim()) { lineIdx++; continue; }
-      try {
-        const data = JSON.parse(line);
-        if (data.type === 'user') { lastUserIdx = lineIdx; }
-        if (data.type === 'assistant') {
-          lastAssistantIdx = lineIdx;
-          if (data.message?.stop_reason) { lastStopReason = data.message.stop_reason; }
-        }
-        if (data.sessionId && !sessionId) { sessionId = data.sessionId; }
-        if (data.type === 'custom-title' && data.customTitle) {
-          customTitle = data.customTitle;
-        } else if (data.type === 'ai-title' && data.aiTitle) {
-          aiTitle = data.aiTitle;
-        }
-        if (data.type === 'assistant' && data.message?.usage) {
-          lastUsage = data.message.usage;
-          lastModel = data.message.model || lastModel;
-          const countUsage = shouldCountMessageUsage(data.message.id, countedMessageIds);
-          if (countUsage) {
-            totalInput += data.message.usage.input_tokens || 0;
-            totalCacheRead += data.message.usage.cache_read_input_tokens || 0;
-            totalCacheCreation += data.message.usage.cache_creation_input_tokens || 0;
-            totalOutput += data.message.usage.output_tokens || 0;
-            // Cache write breakdown: track separately for accurate cost calculation
-            const e5m = data.message.usage.cache_creation?.ephemeral_5m_input_tokens || 0;
-            const e1h = data.message.usage.cache_creation?.ephemeral_1h_input_tokens || 0;
-            if (e5m > 0 || e1h > 0) {
-              totalCacheWrite5m += e5m;
-              totalCacheWrite1h += e1h;
-            } else {
-              totalCacheWriteNoBreakdown += data.message.usage.cache_creation_input_tokens || 0;
-            }
-          }
-          // Compact detection: heuristic fallback for older Claude Code versions without compact_boundary
-          const ctx = (data.message.usage.input_tokens || 0) +
-                      (data.message.usage.cache_creation_input_tokens || 0) +
-                      (data.message.usage.cache_read_input_tokens || 0);
-          if (ctx > 0) {
-            if (ctx > maxContextSeen) { maxContextSeen = ctx; }
-            if (prevContext > 20000 && ctx < prevContext * 0.7 && !compactBoundaryPending) {
-              compactCount++;
-              compactAutoCount++; // heuristic-detected compacts are assumed auto
-              lastCompactFreed = prevContext - ctx;
-            }
-            prevContext = ctx;
-            compactBoundaryPending = false;
-          }
-          if (countUsage) { assistantCount++; }
-        }
-        // Compact detection: explicit compact_boundary system entry (authoritative)
-        if (data.type === 'system' && data.subtype === 'compact_boundary') {
-          compactCount++;
-          if (data.compactMetadata?.trigger === 'manual') { compactManualCount++; } else { compactAutoCount++; }
-          const preTokens = data.compactMetadata?.preTokens || 0;
-          lastCompactFreed = preTokens;
-          if (preTokens > DEFAULT_CONTEXT_SIZE) { hasCompactAbove200K = true; }
-          compactBoundaryPending = true; // suppress next heuristic drop
-        }
-        // Agent activity detection (legacy: progress entries in main JSONL, pre ~2.1.89)
-        if (data.type === 'progress' && data.data?.type === 'agent_progress' && data.data?.agentId) {
-          agentIds.add(data.data.agentId);
-          const ts = new Date(data.timestamp || 0).getTime();
-          agentLastSeen.set(data.data.agentId, ts);
-          const agentUsage = data.data?.message?.message?.usage;
-          if (agentUsage) {
-            const agentMessageId = data.data?.message?.message?.id;
-            if (shouldCountMessageUsage(agentMessageId, countedMessageIds)) {
-              totalInput += agentUsage.input_tokens || 0;
-              totalCacheRead += agentUsage.cache_read_input_tokens || 0;
-              totalCacheCreation += agentUsage.cache_creation_input_tokens || 0;
-              totalOutput += agentUsage.output_tokens || 0;
-              const ae5m = agentUsage.cache_creation?.ephemeral_5m_input_tokens || 0;
-              const ae1h = agentUsage.cache_creation?.ephemeral_1h_input_tokens || 0;
-              if (ae5m > 0 || ae1h > 0) {
-                totalCacheWrite5m += ae5m;
-                totalCacheWrite1h += ae1h;
-              } else {
-                totalCacheWriteNoBreakdown += agentUsage.cache_creation_input_tokens || 0;
-              }
-            }
-          }
-        }
-        if (!firstUserText && data.type === 'user' && data.message?.content) {
-          const text = extractUserText(data.message.content);
-          if (text && !isSkippableText(text)) {
-            firstUserText = text;
-          }
-        }
-      } catch { /* skip */ }
-      lineIdx++;
+    const previous = prevInfo as CachedSessionInfo | undefined;
+    let state = previous?._parseState && previous._parseState._byteOffset > 0 && previous._parseState._byteOffset <= (prevInfo?.fileSize ?? -1) && fileSize >= (prevInfo?.fileSize ?? -1)
+      ? cloneParseState(previous._parseState)
+      : createEmptyParseState();
+    if (!readSessionLines(filePath, fileSize, state)) {
+      state = createEmptyParseState();
+      if (!readSessionLines(filePath, fileSize, state)) { return null; }
     }
 
-    const isActiveTurn = lastUserIdx > lastAssistantIdx || lastStopReason === 'tool_use';
+    const isActiveTurn = state.lastUserIdx > state.lastAssistantIdx || state.lastStopReason === 'tool_use';
 
-    if (!lastUsage) { return null; }
+    if (!state.lastUsage) { return null; }
 
     // Subagent usage: parse subagent JSONL files directly (new format, ~2.1.89+)
     // Falls back gracefully if no subagent dir exists or if legacy progress entries were found
-    const subagent = parseSubagentUsage(filePath, countedMessageIds);
-    if (agentIds.size === 0 && subagent.count > 0) {
+    const subagentCountedMessageIds = new Set(state.countedMessageIds);
+    const subagent = parseSubagentUsage(filePath, subagentCountedMessageIds);
+    if (subagentMtimeMs !== undefined) { subagent.maxMtimeMs = subagentMtimeMs; }
+    let totalInput = state.totalInput;
+    let totalCacheRead = state.totalCacheRead;
+    let totalCacheCreation = state.totalCacheCreation;
+    let totalOutput = state.totalOutput;
+    let totalCacheWrite5m = state.totalCacheWrite5m;
+    let totalCacheWrite1h = state.totalCacheWrite1h;
+    let totalCacheWriteNoBreakdown = state.totalCacheWriteNoBreakdown;
+    if (state.agentIds.size === 0 && subagent.count > 0) {
       // New format: no progress entries in main JSONL, agent data in subagent files
       totalInput += subagent.input;
       totalCacheRead += subagent.cacheRead;
@@ -852,36 +979,36 @@ function parseSessionJsonl(
       totalCacheWrite1h += subagent.cacheWrite1h;
       totalCacheWriteNoBreakdown += subagent.cacheWriteNoBreakdown;
     }
-    const totalAgentCount = agentIds.size > 0 ? agentIds.size : subagent.count;
-    const agentTimestamps = agentIds.size > 0 ? [...agentLastSeen.values()] : subagent.timestamps;
+    const totalAgentCount = state.agentIds.size > 0 ? state.agentIds.size : subagent.count;
+    const agentTimestamps = state.agentIds.size > 0 ? [...state.agentLastSeen.values()] : subagent.timestamps;
 
-    const inputTokens = lastUsage.input_tokens || 0;
-    const cacheReadTokens = lastUsage.cache_read_input_tokens || 0;
-    const cacheCreationTokens = lastUsage.cache_creation_input_tokens || 0;
+    const inputTokens = state.lastUsage.input_tokens || 0;
+    const cacheReadTokens = state.lastUsage.cache_read_input_tokens || 0;
+    const cacheCreationTokens = state.lastUsage.cache_creation_input_tokens || 0;
     const contextUsed = inputTokens + cacheCreationTokens + cacheReadTokens;
-    const explicit1m = /[\[(]1[mM][\])]$/.test(lastModel) ? 1_000_000 : null;
+    const explicit1m = /[\[(]1[mM][\])]$/.test(state.lastModel) ? 1_000_000 : null;
     // Evidence-based 1M: session held >200K tokens at some point (current peak or pre-compact).
     // This is the strongest per-session signal — a window that actually exceeded the 200K base
     // must be extended. It only promotes upward, so it never hides compact pressure.
-    const evidenced1m = (maxContextSeen > DEFAULT_CONTEXT_SIZE || hasCompactAbove200K) ? 1_000_000 : null;
+    const evidenced1m = (state.maxContextSeen > DEFAULT_CONTEXT_SIZE || state.hasCompactAbove200K) ? 1_000_000 : null;
     // Settings-based 1M: weaker than evidenced (reflects the CURRENT settings model, not the
     // model in effect when this session was created). Applied only when the session's model
     // matches the settings model carrying [1m], or when contextWindowOverride comes from
     // GrowthBook (settingsModelNormalized is null → environment-wide, no specific model).
     const settingsMatch1m = (settings.contextWindowOverride !== null
-      && isExtendedContextModel(lastModel)
+      && isExtendedContextModel(state.lastModel)
       && (settings.settingsModelNormalized === null
-          || settingsModelsMatch(lastModel, settings.settingsModelNormalized)))
+          || settingsModelsMatch(state.lastModel, settings.settingsModelNormalized)))
       ? settings.contextWindowOverride : null;
     const contextMax = settings.maxTokensOverride
       ?? explicit1m
       ?? evidenced1m
       ?? settingsMatch1m
-      ?? getContextMaxForModel(lastModel);
-    const autoCompactWindowSettings = settings.autoCompactWindow ?? (normalizeModelId(lastModel) === 'claude-opus-4-8'
+      ?? getContextMaxForModel(state.lastModel);
+    const autoCompactWindowSettings = settings.autoCompactWindow ?? (normalizeModelId(state.lastModel) === 'claude-opus-4-8'
       ? settings.redwood2AutoCompactWindow
       : null);
-    const autoCompact = computeAutoCompact(lastModel, contextMax, {
+    const autoCompact = computeAutoCompact(state.lastModel, contextMax, {
       autoCompactWindowEnv: settings.autoCompactWindowEnv ?? undefined,
       autoCompactWindowSettings: autoCompactWindowSettings ?? undefined,
       autoCompactEnabled: settings.autoCompactEnabled,
@@ -896,12 +1023,12 @@ function parseSessionJsonl(
     const usagePercent = (contextUsed / usageBase) * 100;
     const tokensUntilCompact = Math.max(0, compactThreshold - contextUsed);
 
-    const sessionName = customTitle
-      || aiTitle
+    const sessionName = state.customTitle
+      || state.aiTitle
       || cleanSessionName(
-        firstUserText
-          ? firstUserText.replace(/\n/g, ' ').trim()
-          : (sessionId ? sessionId.substring(0, 8) : path.basename(filePath, '.jsonl').substring(0, 8))
+        state.firstUserText
+          ? state.firstUserText.replace(/\n/g, ' ').trim()
+          : (state.sessionId ? state.sessionId.substring(0, 8) : path.basename(filePath, '.jsonl').substring(0, 8))
       );
 
     let activeAgentCount = 0;
@@ -910,12 +1037,12 @@ function parseSessionJsonl(
       if (now - ts < 15000) { activeAgentCount++; }
     }
 
-    const tasksMtime = getTasksMaxMtime(projectDir, sessionId);
+    const tasksMtime = tasksMtimeMs ?? getTasksMaxMtime(projectDir, state.sessionId);
     const effectiveMtime = Math.max(mtimeMs, subagent.maxMtimeMs, tasksMtime);
-    return {
-      sessionId, sessionName, model: lastModel,
+    const info: CachedSessionInfo = {
+      sessionId: state.sessionId, sessionName, model: state.lastModel,
       contextUsed, contextMax, usagePercent,
-      messageCount: assistantCount,
+      messageCount: state.assistantCount,
       autocompactPct: settings.autocompactPct, tokensUntilCompact,
       autoCompactActive: autoCompact.active,
       autoCompactSource: autoCompact.source,
@@ -925,23 +1052,28 @@ function parseSessionJsonl(
       outputReserve: autoCompact.outputReserve,
       mtimeMs, displayMtimeMs: effectiveMtime, fileSize, filePath,
       projectDir, projectLabel,
-      isActiveTurn, lastStopReason,
-      status: getSessionStatus(effectiveMtime, mtimeMs, isActiveTurn, true, sessionId),
+      isActiveTurn, lastStopReason: state.lastStopReason,
+      status: getSessionStatus(effectiveMtime, mtimeMs, isActiveTurn, true, state.sessionId),
       inputTokens: totalInput, cacheReadTokens: totalCacheRead,
       cacheCreationTokens: totalCacheCreation, outputTokens: totalOutput,
       totalCacheWrite5m, totalCacheWrite1h, totalCacheWriteNoBreakdown,
-      compactCount, compactAutoCount, compactManualCount, lastCompactFreed,
+      compactCount: state.compactCount,
+      compactAutoCount: state.compactAutoCount,
+      compactManualCount: state.compactManualCount,
+      lastCompactFreed: state.lastCompactFreed,
       activeAgentCount, totalAgentCount, _agentTimestamps: agentTimestamps,
       tasksMtimeMs: tasksMtime,
       subagentMtimeMs: subagent.maxMtimeMs,
       settingsCacheKey,
+      _parseState: state,
     };
+    return info;
   } catch { return null; }
 }
 
 // ─── Session cache ───
 
-const sessionCache = new Map<string, SessionInfo>();
+const sessionCache = new Map<string, CachedSessionInfo>();
 
 export function clearSessionCache(): void {
   sessionCache.clear();
@@ -1008,10 +1140,12 @@ export function findAllSessionsCached(
             continue;
           }
 
-          const info = parseSessionJsonl(filePath, settings, settingsCacheKey, mtime, size, projectDir, projectLabel);
+          const info = parseSessionJsonl(filePath, settings, settingsCacheKey, mtime, size, projectDir, projectLabel, tasksMtime, subagentMtime, cached);
           if (info) {
-            sessionCache.set(filePath, info);
+            sessionCache.set(filePath, info as CachedSessionInfo);
             sessions.push(info);
+          } else {
+            sessionCache.delete(filePath);
           }
         } catch { continue; }
       }
@@ -1022,6 +1156,89 @@ export function findAllSessionsCached(
     if (!seenPaths.has(key)) { sessionCache.delete(key); }
   }
 
+  sessions.sort((a, b) => b.displayMtimeMs - a.displayMtimeMs);
+  return sessions;
+}
+
+export function findDirtySessionsCached(
+  projectsDir: string,
+  settings: ClaudeSettings,
+  inactiveMs: number,
+  keepSessionIds: ReadonlySet<string>,
+  previousSessions: SessionInfo[],
+  dirtyPaths: ReadonlySet<string>,
+): SessionInfo[] {
+  if (previousSessions.length === 0 || dirtyPaths.size === 0) {
+    return findAllSessionsCached(projectsDir, settings, inactiveMs, keepSessionIds);
+  }
+
+  const normalizedProjectsDir = path.resolve(projectsDir);
+  const jsonlPaths = [...dirtyPaths]
+    .map(p => path.resolve(p))
+    .filter(p => p.endsWith('.jsonl') && path.dirname(path.dirname(p)) === normalizedProjectsDir);
+  if (jsonlPaths.length !== dirtyPaths.size) {
+    return findAllSessionsCached(projectsDir, settings, inactiveMs, keepSessionIds);
+  }
+
+  const now = Date.now();
+  const settingsCacheKey = getSettingsCacheKey(settings);
+  const byPath = new Map(previousSessions.map(s => [path.resolve(s.filePath), s as SessionInfo]));
+
+  for (const filePath of jsonlPaths) {
+    const projectDir = path.basename(path.dirname(filePath));
+    const projectLabel = decodeProjectDir(projectDir);
+    const sessionId = path.basename(filePath, '.jsonl');
+    try {
+      const stat = fs.statSync(filePath);
+      const tasksMtime = getTasksMaxMtime(projectDir, sessionId);
+      const subagentMtime = getSubagentMaxMtime(filePath);
+      const effectiveMtime = Math.max(stat.mtimeMs, subagentMtime, tasksMtime);
+      if (now - effectiveMtime > inactiveMs && !keepSessionIds.has(sessionId)) {
+        sessionCache.delete(filePath);
+        byPath.delete(filePath);
+        continue;
+      }
+
+      const cached = sessionCache.get(filePath);
+      const subagentChanged = cached ? subagentMtime !== cached.subagentMtimeMs : false;
+      if (
+        cached &&
+        cached.mtimeMs === stat.mtimeMs &&
+        cached.fileSize === stat.size &&
+        cached.settingsCacheKey === settingsCacheKey &&
+        !subagentChanged
+      ) {
+        const activityChanged = tasksMtime !== cached.tasksMtimeMs;
+        cached.tasksMtimeMs = tasksMtime;
+        cached.status = getSessionStatus(effectiveMtime, stat.mtimeMs, cached.isActiveTurn, activityChanged, cached.sessionId);
+        cached.displayMtimeMs = effectiveMtime;
+        let activeCount = 0;
+        for (const ts of cached._agentTimestamps) {
+          if (now - ts < 15000) { activeCount++; }
+        }
+        cached.activeAgentCount = activeCount;
+        byPath.set(filePath, cached);
+        continue;
+      }
+
+      const info = parseSessionJsonl(
+        filePath, settings, settingsCacheKey, stat.mtimeMs, stat.size,
+        projectDir, projectLabel, tasksMtime, subagentMtime, cached,
+      );
+      if (info) {
+        sessionCache.set(filePath, info as CachedSessionInfo);
+        byPath.set(filePath, info);
+      } else {
+        sessionCache.delete(filePath);
+        byPath.delete(filePath);
+      }
+    } catch {
+      sessionCache.delete(filePath);
+      byPath.delete(filePath);
+    }
+  }
+
+  const sessions = [...byPath.values()];
   sessions.sort((a, b) => b.displayMtimeMs - a.displayMtimeMs);
   return sessions;
 }

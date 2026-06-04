@@ -4,7 +4,7 @@ import * as path from 'path';
 import * as os from 'os';
 
 import {
-  readClaudeSettings, findAllSessionsCached, clearSessionCache,
+  readClaudeSettings, findAllSessionsCached, findDirtySessionsCached, clearSessionCache,
   ClaudeSettings, getMonitorDir, SortMode, FilterMode, ModelFilter, GroupMode,
   findUnknownPricingModels,
 } from './sessions';
@@ -14,11 +14,15 @@ import { fetchRateLimits, startCredentialsWatch, stopCredentialsWatch } from './
 // ─── Constants ───
 
 const DEBOUNCE_MS = 300;
+const EXTENDED_DEBOUNCE_MS = 1000;
+const DIRTY_QUEUE_EXTEND_THRESHOLD = 100;
+const DIRTY_QUEUE_FULL_RECONCILE_THRESHOLD = 10_000;
+const MAX_JSONL_WATCHERS = 50;
 
 
 function getPollIntervalMs(): number {
   const config = vscode.workspace.getConfiguration('claudeCodeVitals');
-  const seconds = config.get<number>('pollInterval', 5);
+  const seconds = config.get<number>('pollInterval', 60);
   return Math.max(1, Math.min(60, seconds)) * 1000;
 }
 
@@ -62,6 +66,7 @@ export function activate(context: vscode.ExtensionContext) {
 
   let watchers = new Map<string, fs.FSWatcher>();
   let lastMtimes = new Map<string, number>();
+  let currentSessions: import('./sessions').SessionInfo[] = [];
   let lastSettings: ClaudeSettings = {
     maxTokensOverride: null,
     autocompactPct: 0,
@@ -79,26 +84,54 @@ export function activate(context: vscode.ExtensionContext) {
   let lastTooltipDisplay = '';
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
   let pollTimer: ReturnType<typeof setInterval>;
+  let refreshRunning = false;
+  let refreshPending = false;
+  let forceReconcile = true;
+  const dirtyPaths = new Set<string>();
   const notifiedSessions = new Set<string>();
   const reportedUnknownModels = new Set<string>();
 
-  function scheduleRefresh() {
-    if (debounceTimer) { clearTimeout(debounceTimer); }
-    debounceTimer = setTimeout(refresh, DEBOUNCE_MS);
+  function markDirtyPath(p: string, reconcile = false): void {
+    if (dirtyPaths.size > DIRTY_QUEUE_FULL_RECONCILE_THRESHOLD) {
+      dirtyPaths.clear();
+      forceReconcile = true;
+      return;
+    }
+    dirtyPaths.add(p);
+    if (reconcile) { forceReconcile = true; }
   }
 
-  function refresh() {
+  function scheduleRefresh(p?: string, reconcile = false) {
+    if (p) { markDirtyPath(p, reconcile); }
+    else if (reconcile) { forceReconcile = true; }
+    if (debounceTimer) { clearTimeout(debounceTimer); }
+    const delay = dirtyPaths.size > DIRTY_QUEUE_EXTEND_THRESHOLD ? EXTENDED_DEBOUNCE_MS : DEBOUNCE_MS;
+    debounceTimer = setTimeout(() => { void refresh(); }, delay);
+  }
+
+  async function refresh() {
+    if (refreshRunning) {
+      refreshPending = true;
+      return;
+    }
+    refreshRunning = true;
     debounceTimer = null;
 
-    const config = vscode.workspace.getConfiguration('claudeCodeVitals');
-    const warnThreshold = config.get<number>('warningThreshold', 75);
-    const critThreshold = config.get<number>('criticalThreshold', 95);
-    const inactiveHours = config.get<number>('inactiveHours', 24);
-    const notificationLevel = config.get<string>('notificationLevel', 'none');
-    const effectiveLevel = notificationLevel;
-    const inactiveMs = inactiveHours * 60 * 60 * 1000;
+    try {
+      const refreshDirtyPaths = new Set(dirtyPaths);
+      dirtyPaths.clear();
+      const shouldReconcile = forceReconcile || refreshDirtyPaths.size === 0;
+      forceReconcile = false;
 
-    const settings = readClaudeSettings();
+      const config = vscode.workspace.getConfiguration('claudeCodeVitals');
+      const warnThreshold = config.get<number>('warningThreshold', 75);
+      const critThreshold = config.get<number>('criticalThreshold', 95);
+      const inactiveHours = config.get<number>('inactiveHours', 24);
+      const notificationLevel = config.get<string>('notificationLevel', 'none');
+      const effectiveLevel = notificationLevel;
+      const inactiveMs = inactiveHours * 60 * 60 * 1000;
+
+      const settings = readClaudeSettings();
 
     // Detect changes — clear cache before loading if settings changed
     const settingsChanged =
@@ -134,9 +167,15 @@ export function activate(context: vscode.ExtensionContext) {
       cardDisplayKey !== lastCardDisplay ||
       tooltipDisplayKey !== lastTooltipDisplay;
 
-    if (settingsChanged) { clearSessionCache(); }
+      if (settingsChanged) {
+        clearSessionCache();
+        forceReconcile = false;
+      }
 
-    const sessions = findAllSessionsCached(projectsDir, settings, inactiveMs, sessionProvider.pinnedSessionIds);
+      const sessions = (settingsChanged || shouldReconcile)
+        ? findAllSessionsCached(projectsDir, settings, inactiveMs, sessionProvider.pinnedSessionIds)
+        : findDirtySessionsCached(projectsDir, settings, inactiveMs, sessionProvider.pinnedSessionIds, currentSessions, refreshDirtyPaths);
+      currentSessions = sessions;
 
     let dataChanged = settingsChanged || configChanged || sessions.length !== lastMtimes.size;
     if (!dataChanged) {
@@ -147,87 +186,102 @@ export function activate(context: vscode.ExtensionContext) {
 
     // Update file watchers
     const newPaths = new Set(sessions.map(s => s.filePath));
-    for (const [p, w] of watchers) {
-      if (!newPaths.has(p)) { w.close(); watchers.delete(p); }
-    }
-    for (const s of sessions) {
-      if (!watchers.has(s.filePath)) {
-        try {
-          const w = fs.watch(s.filePath, () => scheduleRefresh());
-          watchers.set(s.filePath, w);
-        } catch (e) { log(`Failed to watch file: ${s.filePath}: ${e}`); }
+      for (const [p, w] of watchers) {
+        if (!newPaths.has(p) || sessions.length > MAX_JSONL_WATCHERS) { w.close(); watchers.delete(p); }
       }
-    }
+      if (sessions.length <= MAX_JSONL_WATCHERS) {
+        for (const s of sessions) {
+          if (!watchers.has(s.filePath)) {
+            try {
+              const w = fs.watch(s.filePath, () => scheduleRefresh(s.filePath));
+              watchers.set(s.filePath, w);
+            } catch (e) { log(`Failed to watch file: ${s.filePath}: ${e}`); }
+          }
+        }
+      }
+      if (sessions.length > MAX_JSONL_WATCHERS && watchers.size > 0) {
+        for (const w of watchers.values()) { w.close(); }
+        watchers.clear();
+      }
 
-    if (dataChanged) {
-      lastMtimes = new Map(sessions.map(s => [s.filePath, s.displayMtimeMs]));
-      lastSettings = settings;
-      lastWarnThreshold = warnThreshold;
-      lastCritThreshold = critThreshold;
-      lastInactiveHours = inactiveHours;
-      lastNotifyLevel = effectiveLevel;
-      lastCardDisplay = cardDisplayKey;
-      lastTooltipDisplay = tooltipDisplayKey;
-    }
+      if (dataChanged) {
+        lastMtimes = new Map(sessions.map(s => [s.filePath, s.displayMtimeMs]));
+        lastSettings = settings;
+        lastWarnThreshold = warnThreshold;
+        lastCritThreshold = critThreshold;
+        lastInactiveHours = inactiveHours;
+        lastNotifyLevel = effectiveLevel;
+        lastCardDisplay = cardDisplayKey;
+        lastTooltipDisplay = tooltipDisplayKey;
+      }
 
     // Sparkline data collection
-    const history: UsageHistory = context.globalState.get('usageHistory', {});
-    for (const s of sessions) {
-      if (!history[s.sessionId]) { history[s.sessionId] = []; }
-      const points = history[s.sessionId];
-      const last = points[points.length - 1];
-      if (!last || last.u !== s.contextUsed) {
-        points.push({ t: Date.now(), u: s.contextUsed });
+      const history: UsageHistory = context.globalState.get('usageHistory', {});
+      for (const s of sessions) {
+        if (!history[s.sessionId]) { history[s.sessionId] = []; }
+        const points = history[s.sessionId];
+        const last = points[points.length - 1];
+        if (!last || last.u !== s.contextUsed) {
+          points.push({ t: Date.now(), u: s.contextUsed });
+        }
+        if (points.length > 100) {
+          history[s.sessionId] = points.slice(-100);
+        }
       }
-      if (points.length > 100) {
-        history[s.sessionId] = points.slice(-100);
+      // Clean up sessions no longer active
+      const activeIds = new Set(sessions.map(s => s.sessionId));
+      for (const sid of Object.keys(history)) {
+        if (!activeIds.has(sid)) { delete history[sid]; }
       }
-    }
-    // Clean up sessions no longer active
-    const activeIds = new Set(sessions.map(s => s.sessionId));
-    for (const sid of Object.keys(history)) {
-      if (!activeIds.has(sid)) { delete history[sid]; }
-    }
-    context.globalState.update('usageHistory', history);
+      context.globalState.update('usageHistory', history);
 
     // Always update views (status is time-dependent)
-    sessionProvider.updateDisplaySettings(cardDisplay, tooltipDisplay, progressMode);
-    sessionProvider.update(sessions, warnThreshold, critThreshold, history);
-    overviewProvider.update(sessions, settings);
+      sessionProvider.updateDisplaySettings(cardDisplay, tooltipDisplay, progressMode);
+      sessionProvider.update(sessions, warnThreshold, critThreshold, history);
+      overviewProvider.update(sessions, settings);
 
-    for (const modelId of findUnknownPricingModels(sessions)) {
-      if (reportedUnknownModels.has(modelId)) { continue; }
-      reportedUnknownModels.add(modelId);
-      log(`[pricing] Unknown model: ${modelId} — cost reported as $0. Update MODEL_PRICING in sessions.ts.`);
-    }
+      for (const modelId of findUnknownPricingModels(sessions)) {
+        if (reportedUnknownModels.has(modelId)) { continue; }
+        reportedUnknownModels.add(modelId);
+        log(`[pricing] Unknown model: ${modelId} — cost reported as $0. Update MODEL_PRICING in sessions.ts.`);
+      }
 
     // Fetch rate limits asynchronously (only when data changed, respects 60s cache)
-    if (dataChanged) {
-      fetchRateLimits().then(info => {
-        overviewProvider.updateRateLimit(info);
-      }).catch((e) => { log(`Failed to fetch rate limits: ${e}`); });
-    }
+      if (dataChanged) {
+        fetchRateLimits().then(info => {
+          overviewProvider.updateRateLimit(info);
+        }).catch((e) => { log(`Failed to fetch rate limits: ${e}`); });
+      }
 
     // Notifications (opt-in, only on data change)
-    if (dataChanged && effectiveLevel !== 'none') {
-      const threshold = effectiveLevel === 'warning' ? warnThreshold : critThreshold;
-      for (const s of sessions) {
-        if (s.usagePercent >= threshold) {
-          if (!notifiedSessions.has(s.filePath)) {
-            notifiedSessions.add(s.filePath);
-            const name = s.sessionName.length > 30
-              ? s.sessionName.substring(0, 30) + '...'
-              : s.sessionName;
-            const msg = `Claude session "${name}" at ${s.usagePercent.toFixed(0)}% context usage`;
-            if (effectiveLevel === 'critical') {
-              vscode.window.showWarningMessage(msg);
-            } else {
-              vscode.window.showInformationMessage(msg);
+      if (dataChanged && effectiveLevel !== 'none') {
+        const threshold = effectiveLevel === 'warning' ? warnThreshold : critThreshold;
+        for (const s of sessions) {
+          if (s.usagePercent >= threshold) {
+            if (!notifiedSessions.has(s.filePath)) {
+              notifiedSessions.add(s.filePath);
+              const name = s.sessionName.length > 30
+                ? s.sessionName.substring(0, 30) + '...'
+                : s.sessionName;
+              const msg = `Claude session "${name}" at ${s.usagePercent.toFixed(0)}% context usage`;
+              if (effectiveLevel === 'critical') {
+                vscode.window.showWarningMessage(msg);
+              } else {
+                vscode.window.showInformationMessage(msg);
+              }
             }
+          } else {
+            notifiedSessions.delete(s.filePath);
           }
-        } else {
-          notifiedSessions.delete(s.filePath);
         }
+      }
+    } catch (e) {
+      log(`Refresh failed: ${e}`);
+    } finally {
+      refreshRunning = false;
+      if (refreshPending) {
+        refreshPending = false;
+        scheduleRefresh();
       }
     }
   }
@@ -247,7 +301,10 @@ export function activate(context: vscode.ExtensionContext) {
 
   // Commands
   context.subscriptions.push(
-    vscode.commands.registerCommand('claude-code-vitals.refresh', refresh),
+    vscode.commands.registerCommand('claude-code-vitals.refresh', () => {
+      forceReconcile = true;
+      return refresh();
+    }),
     vscode.commands.registerCommand('claude-code-vitals.sortByTime', () => sessionProvider.setSortMode('time')),
     vscode.commands.registerCommand('claude-code-vitals.sortByUsage', () => sessionProvider.setSortMode('usage')),
     vscode.commands.registerCommand('claude-code-vitals.sortByCompact', () => sessionProvider.setSortMode('compact')),
@@ -273,11 +330,12 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.workspace.onDidChangeConfiguration(e => {
       if (e.affectsConfiguration('claudeCodeVitals')) {
         clearSessionCache();
-        refresh();
+        forceReconcile = true;
+        void refresh();
 
         if (e.affectsConfiguration('claudeCodeVitals.pollInterval')) {
           clearInterval(pollTimer);
-          pollTimer = setInterval(scheduleRefresh, getPollIntervalMs());
+          pollTimer = setInterval(() => scheduleRefresh(projectsDir, true), getPollIntervalMs());
         }
 
         // Auto setup/remove hooks based on enableHookDetection
@@ -304,13 +362,19 @@ export function activate(context: vscode.ExtensionContext) {
   // Watch project directories for new session files
   const dirWatchers: fs.FSWatcher[] = [];
   try {
-    const dw = fs.watch(projectsDir, () => scheduleRefresh());
+    const dw = fs.watch(projectsDir, () => scheduleRefresh(projectsDir, true));
     dirWatchers.push(dw);
     for (const dirent of fs.readdirSync(projectsDir, { withFileTypes: true })) {
       if (!dirent.isDirectory()) { continue; }
       try {
         const projPath = path.join(projectsDir, dirent.name);
-        const dw2 = fs.watch(projPath, () => scheduleRefresh());
+        const dw2 = fs.watch(projPath, (_event, filename) => {
+          if (filename && filename.endsWith('.jsonl')) {
+            scheduleRefresh(path.join(projPath, filename.toString()));
+          } else {
+            scheduleRefresh(projPath, true);
+          }
+        });
         dirWatchers.push(dw2);
         // Watch subagent directories for agent activity detection
         for (const sub of fs.readdirSync(projPath, { withFileTypes: true })) {
@@ -318,7 +382,7 @@ export function activate(context: vscode.ExtensionContext) {
           const subagentDir = path.join(projPath, sub.name, 'subagents');
           try {
             if (fs.existsSync(subagentDir)) {
-              const dw3 = fs.watch(subagentDir, () => scheduleRefresh());
+              const dw3 = fs.watch(subagentDir, () => scheduleRefresh(subagentDir, true));
               dirWatchers.push(dw3);
             }
           } catch { /* skip */ }
@@ -331,7 +395,7 @@ export function activate(context: vscode.ExtensionContext) {
   const tasksBase = path.join(os.tmpdir(), 'claude');
   try {
     if (fs.existsSync(tasksBase)) {
-      const tw = fs.watch(tasksBase, { recursive: true }, () => scheduleRefresh());
+      const tw = fs.watch(tasksBase, { recursive: true }, () => scheduleRefresh(tasksBase, true));
       dirWatchers.push(tw);
     }
   } catch (e) { log(`Failed to watch tasks dirs: ${e}`); }
@@ -340,7 +404,7 @@ export function activate(context: vscode.ExtensionContext) {
   try {
     const monitorDir = getMonitorDir();
     fs.mkdirSync(monitorDir, { recursive: true });
-    const monitorWatcher = fs.watch(monitorDir, () => scheduleRefresh());
+    const monitorWatcher = fs.watch(monitorDir, () => scheduleRefresh(monitorDir, true));
     dirWatchers.push(monitorWatcher);
   } catch (e) { log(`Failed to watch monitor dir: ${e}`); }
 
@@ -360,9 +424,9 @@ export function activate(context: vscode.ExtensionContext) {
   }
 
   // Start
-  startCredentialsWatch(scheduleRefresh);
-  refresh();
-  pollTimer = setInterval(scheduleRefresh, getPollIntervalMs());
+  startCredentialsWatch(() => scheduleRefresh(projectsDir, true));
+  void refresh();
+  pollTimer = setInterval(() => scheduleRefresh(projectsDir, true), getPollIntervalMs());
 
   context.subscriptions.push({
     dispose: () => {
