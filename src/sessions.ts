@@ -168,11 +168,12 @@ interface SessionParseState {
 
 interface CachedSessionInfo extends SessionInfo {
   _parseState?: SessionParseState;
+  _subagentFileCache?: Map<string, SubagentFileCache>;
 }
 
 export type SortMode = 'time' | 'usage' | 'compact';
 export type FilterMode = 'all' | 'warning' | 'critical';
-export type ModelFilter = 'all' | 'opus' | 'sonnet' | 'haiku';
+export type ModelFilter = 'all' | 'fable' | 'opus' | 'sonnet' | 'haiku';
 export type GroupMode = 'none' | 'project' | 'status' | 'custom';
 export type AutoCompactSource = 'env' | 'settings' | 'default';
 
@@ -362,14 +363,15 @@ export function readClaudeSettings(): ClaudeSettings {
 // opus-4-8/4-7 may auto-upgrade to 1M on the first-party API without [1m], but that
 // is not encoded as a default here: assuming 1M for a 200K-capped environment would
 // hide real compact pressure, whereas a conservative 200K default only over-warns.
-// Aliases (opus/sonnet/haiku) map to the current default version.
-// (2026-04-17 verified against docs.anthropic.com)
+// Aliases (fable/opus/sonnet/haiku) map to the current default version.
+// (2026-04-17 verified against docs.anthropic.com; claude-fable-5 added 2026-06-10)
 interface ModelInfo {
   contextSize: number;
   supportsExtended: boolean;
 }
 
 const MODEL_INFO: Record<string, ModelInfo> = {
+  'claude-fable-5':    { contextSize: 200_000, supportsExtended: true },
   'claude-opus-4-8':   { contextSize: 200_000, supportsExtended: true },
   'claude-opus-4-7':   { contextSize: 200_000, supportsExtended: true },
   'claude-opus-4-6':   { contextSize: 200_000, supportsExtended: true },
@@ -381,13 +383,14 @@ const MODEL_INFO: Record<string, ModelInfo> = {
   'claude-sonnet-4':   { contextSize: 200_000, supportsExtended: false },
   'claude-haiku-4-5':  { contextSize: 200_000, supportsExtended: false },
   // Short aliases → current default version
+  'fable':  { contextSize: 200_000, supportsExtended: true },
   'opus':   { contextSize: 200_000, supportsExtended: true },
   'sonnet': { contextSize: 200_000, supportsExtended: true },
   'haiku':  { contextSize: 200_000, supportsExtended: false },
 };
 
 // API pricing per million tokens (2026-04-17 verified against docs.anthropic.com)
-// Aliases (opus/sonnet/haiku) apply to the current default version and any newer
+// Aliases (fable/opus/sonnet/haiku) apply to the current default version and any newer
 // model that shares the alias's pricing. Per-ID entries override the alias for
 // legacy versions whose pricing differs (e.g. Opus 4.1 is 3x the Opus 4.6 rate).
 interface ModelPricing {
@@ -399,6 +402,9 @@ interface ModelPricing {
 }
 
 const MODEL_PRICING: Record<string, ModelPricing> = {
+  // Fable 5: $10/$50 per MTok (2026-06-10 verified against platform.claude.com docs).
+  // Cache rates follow the standard multipliers (5m write 1.25x, 1h write 2x, read 0.1x).
+  'fable': { inputPerMToken: 10, cacheWrite5mPerMToken: 12.5, cacheWrite1hPerMToken: 20, cacheReadPerMToken: 1, outputPerMToken: 50 },
   'opus': { inputPerMToken: 5, cacheWrite5mPerMToken: 6.25, cacheWrite1hPerMToken: 10, cacheReadPerMToken: 0.5, outputPerMToken: 25 },
   'sonnet': { inputPerMToken: 3, cacheWrite5mPerMToken: 3.75, cacheWrite1hPerMToken: 6, cacheReadPerMToken: 0.3, outputPerMToken: 15 },
   'haiku': { inputPerMToken: 1, cacheWrite5mPerMToken: 1.25, cacheWrite1hPerMToken: 2, cacheReadPerMToken: 0.1, outputPerMToken: 5 },
@@ -425,6 +431,7 @@ function clampNumber(value: number, min: number, max: number): number {
 function getDefaultMaxOutputTokens(model: string): number {
   const normalized = normalizeModelId(model);
   if (
+    normalized === 'claude-fable-5' ||
     normalized === 'claude-opus-4-8' ||
     normalized === 'claude-opus-4-7' ||
     normalized === 'claude-opus-4-6'
@@ -502,7 +509,7 @@ export function formatTokens(n: number): string {
 
 export function calculateCost(s: SessionInfo): number | null {
   // Prefer exact normalized model ID (covers legacy versions with distinct pricing),
-  // then fall back to the family alias (opus/sonnet/haiku) for current-gen models.
+  // then fall back to the family alias (fable/opus/sonnet/haiku) for current-gen models.
   const pricing = lookupPricing(s.model);
   if (!pricing) { return null; }
   // Breakdown-tracked writes use exact pricing; non-breakdown writes fall back to 1h pricing
@@ -539,6 +546,7 @@ export function formatRelativeTime(mtimeMs: number): string {
 
 export function shortenModel(model: string): string {
   if (!model) { return ''; }
+  if (model.includes('fable')) { return 'fable'; }
   if (model.includes('opus')) { return 'opus'; }
   if (model.includes('sonnet')) { return 'sonnet'; }
   if (model.includes('haiku')) { return 'haiku'; }
@@ -610,7 +618,7 @@ function getSessionStatus(effectiveMtimeMs: number, jsonlMtimeMs: number, isActi
   return 'idle';
 }
 
-// ��── Subagent parsing ───
+// ─── Subagent parsing ───
 
 interface SubagentSummary {
   maxMtimeMs: number;
@@ -623,6 +631,23 @@ interface SubagentSummary {
   cacheWrite5m: number;
   cacheWrite1h: number;
   cacheWriteNoBreakdown: number;
+  fileCache: Map<string, SubagentFileCache>;
+}
+
+/** Per-subagent-file aggregates cached by mtime+size so unchanged files are not
+ *  re-read on every refresh. messageIds records the IDs this file contributed,
+ *  enabling cross-file/main-JSONL dedup checks without re-parsing. */
+interface SubagentFileCache {
+  mtimeMs: number;
+  size: number;
+  input: number;
+  cacheRead: number;
+  cacheCreation: number;
+  output: number;
+  cacheWrite5m: number;
+  cacheWrite1h: number;
+  cacheWriteNoBreakdown: number;
+  messageIds: string[];
 }
 
 function getSubagentMaxMtime(sessionFilePath: string): number {
@@ -651,11 +676,16 @@ function shouldCountMessageUsage(messageId: unknown, countedMessageIds: Set<stri
   return true;
 }
 
-function parseSubagentUsage(sessionFilePath: string, countedMessageIds: Set<string>): SubagentSummary {
+function parseSubagentUsage(
+  sessionFilePath: string,
+  countedMessageIds: Set<string>,
+  prevFileCache?: Map<string, SubagentFileCache>,
+): SubagentSummary {
   const result: SubagentSummary = {
     maxMtimeMs: 0, count: 0, timestamps: [],
     input: 0, cacheRead: 0, cacheCreation: 0, output: 0,
     cacheWrite5m: 0, cacheWrite1h: 0, cacheWriteNoBreakdown: 0,
+    fileCache: new Map(),
   };
   try {
     const sessionId = path.basename(sessionFilePath, '.jsonl');
@@ -668,28 +698,64 @@ function parseSubagentUsage(sessionFilePath: string, countedMessageIds: Set<stri
         if (stat.mtimeMs > result.maxMtimeMs) { result.maxMtimeMs = stat.mtimeMs; }
         result.count++;
         result.timestamps.push(stat.mtimeMs);
+
+        // Unchanged file: reuse cached aggregates instead of re-reading.
+        // Falls back to a full read if any cached ID is already counted elsewhere
+        // (main JSONL legacy progress entries) — dedup then needs line granularity.
+        const cached = prevFileCache?.get(fp);
+        if (
+          cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size &&
+          !cached.messageIds.some(id => countedMessageIds.has(id))
+        ) {
+          for (const id of cached.messageIds) { countedMessageIds.add(id); }
+          result.input += cached.input;
+          result.cacheRead += cached.cacheRead;
+          result.cacheCreation += cached.cacheCreation;
+          result.output += cached.output;
+          result.cacheWrite5m += cached.cacheWrite5m;
+          result.cacheWrite1h += cached.cacheWrite1h;
+          result.cacheWriteNoBreakdown += cached.cacheWriteNoBreakdown;
+          result.fileCache.set(fp, cached);
+          continue;
+        }
+
+        const fileAgg: SubagentFileCache = {
+          mtimeMs: stat.mtimeMs, size: stat.size,
+          input: 0, cacheRead: 0, cacheCreation: 0, output: 0,
+          cacheWrite5m: 0, cacheWrite1h: 0, cacheWriteNoBreakdown: 0,
+          messageIds: [],
+        };
         for (const line of fs.readFileSync(fp, 'utf8').trim().split('\n')) {
           if (!line.trim()) { continue; }
           try {
             const data = JSON.parse(line);
             if (data.type === 'assistant' && data.message?.usage) {
               if (!shouldCountMessageUsage(data.message.id, countedMessageIds)) { continue; }
+              if (typeof data.message.id === 'string' && data.message.id) { fileAgg.messageIds.push(data.message.id); }
               const u = data.message.usage;
-              result.input += u.input_tokens || 0;
-              result.cacheRead += u.cache_read_input_tokens || 0;
-              result.cacheCreation += u.cache_creation_input_tokens || 0;
-              result.output += u.output_tokens || 0;
+              fileAgg.input += u.input_tokens || 0;
+              fileAgg.cacheRead += u.cache_read_input_tokens || 0;
+              fileAgg.cacheCreation += u.cache_creation_input_tokens || 0;
+              fileAgg.output += u.output_tokens || 0;
               const e5m = u.cache_creation?.ephemeral_5m_input_tokens || 0;
               const e1h = u.cache_creation?.ephemeral_1h_input_tokens || 0;
               if (e5m > 0 || e1h > 0) {
-                result.cacheWrite5m += e5m;
-                result.cacheWrite1h += e1h;
+                fileAgg.cacheWrite5m += e5m;
+                fileAgg.cacheWrite1h += e1h;
               } else {
-                result.cacheWriteNoBreakdown += u.cache_creation_input_tokens || 0;
+                fileAgg.cacheWriteNoBreakdown += u.cache_creation_input_tokens || 0;
               }
             }
           } catch { /* skip line */ }
         }
+        result.input += fileAgg.input;
+        result.cacheRead += fileAgg.cacheRead;
+        result.cacheCreation += fileAgg.cacheCreation;
+        result.output += fileAgg.output;
+        result.cacheWrite5m += fileAgg.cacheWrite5m;
+        result.cacheWrite1h += fileAgg.cacheWrite1h;
+        result.cacheWriteNoBreakdown += fileAgg.cacheWriteNoBreakdown;
+        result.fileCache.set(fp, fileAgg);
       } catch { /* skip file */ }
     }
   } catch { /* no subagent dir */ }
@@ -960,7 +1026,7 @@ export function parseSessionJsonl(
     // Subagent usage: parse subagent JSONL files directly (new format, ~2.1.89+)
     // Falls back gracefully if no subagent dir exists or if legacy progress entries were found
     const subagentCountedMessageIds = new Set(state.countedMessageIds);
-    const subagent = parseSubagentUsage(filePath, subagentCountedMessageIds);
+    const subagent = parseSubagentUsage(filePath, subagentCountedMessageIds, previous?._subagentFileCache);
     if (subagentMtimeMs !== undefined) { subagent.maxMtimeMs = subagentMtimeMs; }
     let totalInput = state.totalInput;
     let totalCacheRead = state.totalCacheRead;
@@ -1066,6 +1132,7 @@ export function parseSessionJsonl(
       subagentMtimeMs: subagent.maxMtimeMs,
       settingsCacheKey,
       _parseState: state,
+      _subagentFileCache: subagent.fileCache,
     };
     return info;
   } catch { return null; }

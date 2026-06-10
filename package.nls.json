@@ -2,7 +2,7 @@
   "configuration.title": "Claude Code Vitals",
   "configuration.warningThreshold.description": "Usage percentage threshold for warning state",
   "configuration.criticalThreshold.description": "Usage percentage threshold for critical state",
-  "configuration.pollInterval.description": "Polling interval in seconds (1-60)",
+  "configuration.pollInterval.description": "Reconcile polling interval in seconds (default 60). Active session updates are watcher-driven; this is the fallback when watchers miss events.",
   "configuration.notificationLevel.description": "Notification level for context usage alerts",
   "configuration.notificationLevel.none": "No notifications",
   "configuration.notificationLevel.warning": "Notify at warning threshold",

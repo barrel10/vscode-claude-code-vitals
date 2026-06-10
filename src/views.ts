@@ -248,7 +248,8 @@ export class SessionWebviewProvider implements vscode.WebviewViewProvider {
 
   private updateBadge(): void {
     if (!this._view) { return; }
-    const count = this.allSessions.filter(s => s.usagePercent >= this.warningThreshold).length;
+    // Use getProgress so the badge agrees with the card bars under both progressModes
+    const count = this.allSessions.filter(s => this.getProgress(s) >= this.warningThreshold).length;
     this._view.badge = count > 0
       ? { value: count, tooltip: `${count} session(s) above ${this.warningThreshold}%` }
       : undefined;

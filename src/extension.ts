@@ -233,7 +233,8 @@ export function activate(context: vscode.ExtensionContext) {
       for (const sid of Object.keys(history)) {
         if (!activeIds.has(sid)) { delete history[sid]; }
       }
-      context.globalState.update('usageHistory', history);
+      // History only changes when session data changed — skip the storage write otherwise
+      if (dataChanged) { context.globalState.update('usageHistory', history); }
 
     // Always update views (status is time-dependent)
       sessionProvider.updateDisplaySettings(cardDisplay, tooltipDisplay, progressMode);
@@ -312,6 +313,7 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand('claude-code-vitals.filterWarning', () => sessionProvider.setFilterMode('warning')),
     vscode.commands.registerCommand('claude-code-vitals.filterCritical', () => sessionProvider.setFilterMode('critical')),
     vscode.commands.registerCommand('claude-code-vitals.modelFilterAll', () => sessionProvider.setModelFilter('all')),
+    vscode.commands.registerCommand('claude-code-vitals.modelFilterFable', () => sessionProvider.setModelFilter('fable')),
     vscode.commands.registerCommand('claude-code-vitals.modelFilterOpus', () => sessionProvider.setModelFilter('opus')),
     vscode.commands.registerCommand('claude-code-vitals.modelFilterSonnet', () => sessionProvider.setModelFilter('sonnet')),
     vscode.commands.registerCommand('claude-code-vitals.modelFilterHaiku', () => sessionProvider.setModelFilter('haiku')),

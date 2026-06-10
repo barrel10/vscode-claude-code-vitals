@@ -2,7 +2,7 @@
   "name": "claude-code-vitals",
   "displayName": "Claude Code Vitals",
   "description": "Real-time session status detection, multi-session management, and compact tracking for Claude Code",
-  "version": "1.5.3",
+  "version": "1.6.0",
   "publisher": "barrel1054",
   "license": "MIT",
   "repository": {
@@ -79,6 +79,10 @@
       {
         "command": "claude-code-vitals.modelFilterAll",
         "title": "Claude Code Vitals: Model All"
+      },
+      {
+        "command": "claude-code-vitals.modelFilterFable",
+        "title": "Claude Code Vitals: Model Fable"
       },
       {
         "command": "claude-code-vitals.modelFilterOpus",
@@ -168,19 +172,24 @@
           "group": "5_modelFilter@1"
         },
         {
-          "command": "claude-code-vitals.modelFilterOpus",
+          "command": "claude-code-vitals.modelFilterFable",
           "when": "view == claudeCodeVitalsSessionView",
           "group": "5_modelFilter@2"
         },
         {
-          "command": "claude-code-vitals.modelFilterSonnet",
+          "command": "claude-code-vitals.modelFilterOpus",
           "when": "view == claudeCodeVitalsSessionView",
           "group": "5_modelFilter@3"
         },
         {
-          "command": "claude-code-vitals.modelFilterHaiku",
+          "command": "claude-code-vitals.modelFilterSonnet",
           "when": "view == claudeCodeVitalsSessionView",
           "group": "5_modelFilter@4"
+        },
+        {
+          "command": "claude-code-vitals.modelFilterHaiku",
+          "when": "view == claudeCodeVitalsSessionView",
+          "group": "5_modelFilter@5"
         },
         {
           "command": "claude-code-vitals.toggleShowHidden",
@@ -253,7 +262,7 @@
         },
         "claudeCodeVitals.pollInterval": {
           "type": "number",
-          "default": 5,
+          "default": 60,
           "minimum": 1,
           "maximum": 60,
           "order": 5,
@@ -283,7 +292,7 @@
         "claudeCodeVitals.defaultModelFilter": {
           "type": "string",
           "default": "all",
-          "enum": ["all", "opus", "sonnet", "haiku"],
+          "enum": ["all", "fable", "opus", "sonnet", "haiku"],
           "order": 13,
           "description": "%configuration.defaultModelFilter.description%"
         },

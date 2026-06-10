@@ -126,10 +126,11 @@ Sessionsビューのタイトルバーメニュー（`...`）から切替。
 
 セッショントランスクリプトのトークン使用量に基づく概算。
 
-### 単価テーブル（100万トークンあたり、2026-04-17時点）
+### 単価テーブル（100万トークンあたり、2026-06-10時点）
 
 | モデル | Input | Cache Write 5m | Cache Write 1h | Cache Read | Output |
 |--------|-------|---------------|---------------|------------|--------|
+| Fable | $10.00 | $12.50 | $20.00 | $1.00 | $50.00 |
 | Opus (4.6+) | $5.00 | $6.25 | $10.00 | $0.50 | $25.00 |
 | Opus (4.1/4) | $15.00 | $18.75 | $30.00 | $1.50 | $75.00 |
 | Sonnet | $3.00 | $3.75 | $6.00  | $0.30 | $15.00 |
@@ -158,11 +159,11 @@ VS Code設定（`Ctrl+,`）で `claude code vitals` を検索。
 | `warningThreshold` | 75 | 警告閾値（%） |
 | `criticalThreshold` | 95 | 危険閾値（%） |
 | `notificationLevel` | `none` | 通知レベル（none/warning/critical） |
-| `pollInterval` | 5 | ポーリング間隔（秒、1-60） |
+| `pollInterval` | 60 | リコンサイル用ポーリング間隔（秒、1-60）。通常の更新はwatcher駆動 |
 | `inactiveHours` | 24 | 非アクティブセッションの非表示時間 |
 | `defaultSort` | `time` | デフォルトソート順（time/usage/compact） |
 | `defaultFilter` | `all` | デフォルトフィルタ（all/warning/critical） |
-| `defaultModelFilter` | `all` | デフォルトモデルフィルタ（all/opus/sonnet/haiku） |
+| `defaultModelFilter` | `all` | デフォルトモデルフィルタ（all/fable/opus/sonnet/haiku） |
 | `useEnvOauthToken` | false | usage取得時にディスク上の認証情報より環境変数 `CLAUDE_CODE_OAUTH_TOKEN` を優先する |
 | `progressMode` | `compact` | プログレスバー基準: `compact` or `context` |
 | `cardDisplay` | model, messages, compact, agents, cost ON | カード表示要素 |

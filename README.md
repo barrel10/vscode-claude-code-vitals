@@ -126,10 +126,11 @@ Sort is applied in 3 stages: pinned → status (thinking→waiting→idle→inac
 
 Calculates estimated cost based on token usage in session transcripts.
 
-### Pricing (per 1M tokens, as of 2026-04-17)
+### Pricing (per 1M tokens, as of 2026-06-10)
 
 | Model | Input | Cache Write 5m | Cache Write 1h | Cache Read | Output |
 |-------|-------|---------------|---------------|------------|--------|
+| Fable | $10.00 | $12.50 | $20.00 | $1.00 | $50.00 |
 | Opus (4.6+) | $5.00 | $6.25 | $10.00 | $0.50 | $25.00 |
 | Opus (4.1/4) | $15.00 | $18.75 | $30.00 | $1.50 | $75.00 |
 | Sonnet| $3.00 | $3.75 | $6.00  | $0.30 | $15.00 |
@@ -158,11 +159,11 @@ Search `claude code vitals` in VS Code settings (`Ctrl+,`).
 | `warningThreshold` | 75 | Warning threshold (%) |
 | `criticalThreshold` | 95 | Critical threshold (%) |
 | `notificationLevel` | `none` | Notification trigger level (none/warning/critical) |
-| `pollInterval` | 5 | Polling interval in seconds (1-60) |
+| `pollInterval` | 60 | Reconcile polling interval in seconds (1-60). Regular updates are watcher-driven |
 | `inactiveHours` | 24 | Hide sessions inactive for this many hours |
 | `defaultSort` | `time` | Default sort order (time/usage/compact) |
 | `defaultFilter` | `all` | Default filter (all/warning/critical) |
-| `defaultModelFilter` | `all` | Default model filter (all/opus/sonnet/haiku) |
+| `defaultModelFilter` | `all` | Default model filter (all/fable/opus/sonnet/haiku) |
 | `useEnvOauthToken` | false | Use `CLAUDE_CODE_OAUTH_TOKEN` from the environment before disk credentials when fetching usage |
 | `progressMode` | `compact` | Progress bar basis: `compact` or `context` |
 | `cardDisplay` | model, messages, compact, agents, cost ON | Card metadata elements |

@@ -2,7 +2,7 @@
   "configuration.title": "Claude Code Vitals",
   "configuration.warningThreshold.description": "Warning状態とする使用率の閾値（%）",
   "configuration.criticalThreshold.description": "Critical状態とする使用率の閾値（%）",
-  "configuration.pollInterval.description": "ポーリング間隔（秒、1-60）",
+  "configuration.pollInterval.description": "リコンサイル用ポーリング間隔（秒、既定60）。通常の更新はファイルwatcher駆動で、これはwatcherがイベントを取りこぼした場合のフォールバック",
   "configuration.notificationLevel.description": "コンテキスト使用率の通知レベル",
   "configuration.notificationLevel.none": "通知なし",
   "configuration.notificationLevel.warning": "警告閾値で通知",

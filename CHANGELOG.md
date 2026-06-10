@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.6.0 (2026-06-10)
+
+### Added
+- Claude Fable 5 support: model name, cost estimation, context window detection, and a new Fable entry in the model filter. Fable sessions previously showed a generic "claude" label with no cost estimate
+
+### Fixed
+- The `pollInterval` setting now correctly defaults to 60 seconds as documented (the published default had remained at 5 seconds)
+- Activity bar badge count now agrees with the card progress bars when `progressMode` is set to `context`
+- Japanese localization restored for the `pollInterval` setting description
+
+### Performance
+- Sub-agent transcript files are now cached per file, removing a remaining source of redundant re-reads on sessions with many sub-agents
+
 ## 1.5.3 (2026-06-05)
 
 ### Performance
