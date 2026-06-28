@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.6.1 (2026-06-29)
+
+### Fixed
+- Auto-compact now correctly shows as active for all local users. Previously, local sessions without an explicit `CLAUDE_CODE_AUTO_COMPACT_WINDOW` environment variable could show auto-compact as inactive, diverging from Claude Code's actual default behavior (caused by a removed internal feature gate)
+
 ## 1.6.0 (2026-06-10)
 
 ### Added

@@ -27,9 +27,6 @@ export interface ClaudeSettings {
   maxOutputTokensEnv?: number | null;
   disableCompact?: boolean;
   disableAutoCompact?: boolean;
-  claudeCodeRemote?: boolean;
-  redwood2AutoCompactWindow?: number | null;
-  redwood3?: boolean;
 }
 
 export type SessionStatus = 'thinking' | 'waiting' | 'idle' | 'inactive';
@@ -184,8 +181,6 @@ export interface AutoCompactSettings {
   maxOutputTokensEnv?: number;
   disableCompact?: boolean;
   disableAutoCompact?: boolean;
-  claudeCodeRemote?: boolean;
-  redwood3?: boolean;
 }
 
 export interface AutoCompactInfo {
@@ -248,9 +243,6 @@ export function getSettingsCacheKey(settings: ClaudeSettings): string {
     maxOutputTokensEnv: settings.maxOutputTokensEnv ?? null,
     disableCompact: !!settings.disableCompact,
     disableAutoCompact: !!settings.disableAutoCompact,
-    claudeCodeRemote: !!settings.claudeCodeRemote,
-    redwood2AutoCompactWindow: settings.redwood2AutoCompactWindow ?? null,
-    redwood3: !!settings.redwood3,
   });
 }
 
@@ -265,9 +257,6 @@ export function readClaudeSettings(): ClaudeSettings {
   let maxOutputTokensEnv: number | null = null;
   let disableCompact = false;
   let disableAutoCompact = false;
-  let claudeCodeRemote = false;
-  let redwood2AutoCompactWindow: number | null = null;
-  let redwood3 = false;
   let settingsEnv: Record<string, unknown> = {};
   try {
     const settings = JSON.parse(
@@ -292,7 +281,6 @@ export function readClaudeSettings(): ClaudeSettings {
   maxOutputTokensEnv = parsePositiveNumber(envValue('CLAUDE_CODE_MAX_OUTPUT_TOKENS', settingsEnv));
   disableCompact = envTruthy(envValue('DISABLE_COMPACT', settingsEnv));
   disableAutoCompact = envTruthy(envValue('DISABLE_AUTO_COMPACT', settingsEnv));
-  claudeCodeRemote = envTruthy(envValue('CLAUDE_CODE_REMOTE', settingsEnv));
 
   // Detect context window override from model settings and GrowthBook feature flag.
   // Priority: settings.local.json model [1m] > settings.json model [1m] > GrowthBook flag
@@ -335,14 +323,6 @@ export function readClaudeSettings(): ClaudeSettings {
     }
   }
 
-  try {
-    const claudeJson = JSON.parse(
-      fs.readFileSync(path.join(os.homedir(), '.claude.json'), 'utf8')
-    );
-    const features = claudeJson?.cachedGrowthBookFeatures;
-    redwood2AutoCompactWindow = parsePositiveNumber(features?.tengu_amber_redwood2);
-    redwood3 = envTruthy(features?.tengu_amber_redwood3);
-  } catch { /* ignore */ }
 
   return {
     maxTokensOverride, autocompactPct, contextWindowOverride,
@@ -350,8 +330,7 @@ export function readClaudeSettings(): ClaudeSettings {
     cleanupPeriodDays,
     autoCompactWindow, autoCompactEnabled,
     autoCompactWindowEnv, maxOutputTokensEnv,
-    disableCompact, disableAutoCompact, claudeCodeRemote,
-    redwood2AutoCompactWindow, redwood3,
+    disableCompact, disableAutoCompact,
   };
 }
 
@@ -473,9 +452,7 @@ export function computeAutoCompact(
   const compactThreshold = compactCeiling;
 
   const autoCompactEnabled = settings.autoCompactEnabled !== false && !settings.disableCompact && !settings.disableAutoCompact;
-  const local = !settings.claudeCodeRemote;
-  const hasConfiguredWindow = source === 'env' || source === 'settings';
-  const active = !!autoCompactEnabled && (!local || !!settings.redwood3 || hasConfiguredWindow);
+  const active = !!autoCompactEnabled;
 
   return { active, source, window, effectiveWindow, compactThreshold, outputReserve };
 }
@@ -1071,9 +1048,7 @@ export function parseSessionJsonl(
       ?? evidenced1m
       ?? settingsMatch1m
       ?? getContextMaxForModel(state.lastModel);
-    const autoCompactWindowSettings = settings.autoCompactWindow ?? (normalizeModelId(state.lastModel) === 'claude-opus-4-8'
-      ? settings.redwood2AutoCompactWindow
-      : null);
+    const autoCompactWindowSettings = settings.autoCompactWindow ?? null;
     const autoCompact = computeAutoCompact(state.lastModel, contextMax, {
       autoCompactWindowEnv: settings.autoCompactWindowEnv ?? undefined,
       autoCompactWindowSettings: autoCompactWindowSettings ?? undefined,
@@ -1081,8 +1056,6 @@ export function parseSessionJsonl(
       maxOutputTokensEnv: settings.maxOutputTokensEnv ?? undefined,
       disableCompact: settings.disableCompact,
       disableAutoCompact: settings.disableAutoCompact,
-      claudeCodeRemote: settings.claudeCodeRemote,
-      redwood3: settings.redwood3,
     });
     const compactThreshold = autoCompact.compactThreshold;
     const usageBase = autoCompact.active ? compactThreshold : autoCompact.effectiveWindow;

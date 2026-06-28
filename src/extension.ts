@@ -145,10 +145,7 @@ export function activate(context: vscode.ExtensionContext) {
       settings.autoCompactWindowEnv !== lastSettings.autoCompactWindowEnv ||
       settings.maxOutputTokensEnv !== lastSettings.maxOutputTokensEnv ||
       settings.disableCompact !== lastSettings.disableCompact ||
-      settings.disableAutoCompact !== lastSettings.disableAutoCompact ||
-      settings.claudeCodeRemote !== lastSettings.claudeCodeRemote ||
-      settings.redwood2AutoCompactWindow !== lastSettings.redwood2AutoCompactWindow ||
-      settings.redwood3 !== lastSettings.redwood3;
+      settings.disableAutoCompact !== lastSettings.disableAutoCompact;
     const progressMode = config.get<string>('progressMode', 'compact') as 'compact' | 'context';
     const cardDisplayObj = config.get<Record<string, boolean>>('cardDisplay', {});
     const tooltipDisplayObj = config.get<Record<string, boolean>>('tooltipDisplay', {});
