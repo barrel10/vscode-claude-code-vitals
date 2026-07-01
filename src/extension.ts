@@ -6,9 +6,11 @@ import * as os from 'os';
 import {
   readClaudeSettings, findAllSessionsCached, findDirtySessionsCached, clearSessionCache,
   ClaudeSettings, getMonitorDir, SortMode, FilterMode, ModelFilter, GroupMode,
-  findUnknownPricingModels,
+  findUnknownPricingModels, SessionInfo,
 } from './sessions';
 import { SessionWebviewProvider, OverviewTreeProvider } from './views';
+import { GraphWebviewProvider, GraphData } from './graph-view';
+import { findRecentCodexSessions, getCodexSessionsDir, setCodexLogger, CodexSessionInfo } from './codex';
 import { fetchRateLimits, startCredentialsWatch, stopCredentialsWatch } from './ratelimit';
 
 // ─── Constants ───
@@ -18,6 +20,7 @@ const EXTENDED_DEBOUNCE_MS = 1000;
 const DIRTY_QUEUE_EXTEND_THRESHOLD = 100;
 const DIRTY_QUEUE_FULL_RECONCILE_THRESHOLD = 10_000;
 const MAX_JSONL_WATCHERS = 50;
+const MAX_SUBAGENT_LABEL_CACHE_ENTRIES = 1000;
 
 
 function getPollIntervalMs(): number {
@@ -38,15 +41,32 @@ interface UsageDataPoint {
 }
 type UsageHistory = Record<string, UsageDataPoint[]>;
 
+interface SubagentLabelCacheEntry {
+  mtimeMs: number;
+  size: number;
+  label: string;
+}
+
+const subagentLabelCache = new Map<string, SubagentLabelCacheEntry>();
+
 // ─── Activate ───
 
 export function activate(context: vscode.ExtensionContext) {
   const outputChannel = vscode.window.createOutputChannel('Claude Code Vitals');
   context.subscriptions.push(outputChannel);
   log = (msg: string) => outputChannel.appendLine(`[${new Date().toISOString()}] ${msg}`);
+  setCodexLogger(log);
   const projectsDir = path.join(os.homedir(), '.claude', 'projects');
 
+  const graphProvider = new GraphWebviewProvider(async (sessionId) => {
+    graphProvider.setFocusedSession(sessionId);
+    const cmds = await vscode.commands.getCommands(true);
+    if (cmds.includes('claude-vscode.editor.open')) {
+      vscode.commands.executeCommand('claude-vscode.editor.open', sessionId);
+    }
+  });
   const sessionProvider = new SessionWebviewProvider(async (sessionId) => {
+    graphProvider.setFocusedSession(sessionId);
     const cmds = await vscode.commands.getCommands(true);
     if (cmds.includes('claude-vscode.editor.open')) {
       vscode.commands.executeCommand('claude-vscode.editor.open', sessionId);
@@ -55,9 +75,11 @@ export function activate(context: vscode.ExtensionContext) {
     }
   }, context.globalState);
   const overviewProvider = new OverviewTreeProvider();
+  graphProvider.setRefreshHandler(() => scheduleRefresh(undefined, true));
 
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(SessionWebviewProvider.viewId, sessionProvider),
+    vscode.window.registerWebviewViewProvider(GraphWebviewProvider.viewId, graphProvider),
   );
   const overviewView = vscode.window.createTreeView('claudeCodeVitalsOverviewView', {
     treeDataProvider: overviewProvider,
@@ -236,6 +258,12 @@ export function activate(context: vscode.ExtensionContext) {
     // Always update views (status is time-dependent)
       sessionProvider.updateDisplaySettings(cardDisplay, tooltipDisplay, progressMode);
       sessionProvider.update(sessions, warnThreshold, critThreshold, history);
+
+      // Graph view: Codex session discovery + correlation
+      const codexSessions = findRecentCodexSessions(inactiveHours);
+      const graphDataMap = correlateCodexSessions(sessions, codexSessions, projectsDir);
+      graphProvider.update(sessions, graphDataMap);
+
       overviewProvider.update(sessions, settings);
 
       for (const modelId of findUnknownPricingModels(sessions)) {
@@ -322,6 +350,8 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand('claude-code-vitals.manageGroups', () => sessionProvider.manageCustomGroups()),
     vscode.commands.registerCommand('claude-code-vitals.setupHooks', () => setupHooks(context)),
     vscode.commands.registerCommand('claude-code-vitals.removeHooks', () => removeHooks()),
+    vscode.commands.registerCommand('claude-code-vitals.refreshGraph', () => scheduleRefresh(undefined, true)),
+    vscode.commands.registerCommand('claude-code-vitals.openGraphInEditor', () => graphProvider.openInEditor()),
   );
 
   // Watch config changes
@@ -399,6 +429,15 @@ export function activate(context: vscode.ExtensionContext) {
     }
   } catch (e) { log(`Failed to watch tasks dirs: ${e}`); }
 
+  // Watch Codex rollout files for graph updates
+  const codexSessionsDir = getCodexSessionsDir();
+  try {
+    const codexWatcher = fs.watch(codexSessionsDir, { recursive: true }, () => {
+      scheduleRefresh(undefined, false);
+    });
+    dirWatchers.push(codexWatcher);
+  } catch (e) { log(`Codex sessions dir not found: ${e}`); }
+
   // Watch hook monitor directory for state changes (waiting/stopped)
   try {
     const monitorDir = getMonitorDir();
@@ -435,12 +474,147 @@ export function activate(context: vscode.ExtensionContext) {
       for (const dw of dirWatchers) { dw.close(); }
       stopCredentialsWatch();
       sessionProvider.dispose();
+      graphProvider.dispose();
     },
   });
 }
 
 export function deactivate() {}
 
+function correlateCodexSessions(
+  claudeSessions: SessionInfo[],
+  codexSessions: CodexSessionInfo[],
+  projectsDir: string,
+): Map<string, GraphData> {
+  const map = new Map<string, GraphData>();
+  for (const cs of claudeSessions) {
+    map.set(cs.sessionId, {
+      claudeSessionId: cs.sessionId,
+      codexSessions: [],
+      subagentCount: cs.totalAgentCount,
+      activeSubagentCount: cs.activeAgentCount,
+      subagentTimestamps: cs._agentTimestamps,
+      subagentLabels: readSubagentLabels(projectsDir, cs.projectDir, cs.sessionId, cs.totalAgentCount),
+    });
+  }
+  for (const codex of codexSessions) {
+    const candidates = getEncodedAncestors(codex.cwd);
+    let bestMatch: string | null = null;
+    let bestLen = -1;
+    let bestTimeDiff = Infinity;
+    for (const cs of claudeSessions) {
+      const key = matchKey(cs.projectDir);
+      if (!candidates.has(key)) { continue; }
+      const timeDiff = Math.abs(codex.startTime - cs.displayMtimeMs);
+      if (cs.projectDir.length > bestLen || (cs.projectDir.length === bestLen && timeDiff < bestTimeDiff)) {
+        bestLen = cs.projectDir.length;
+        bestTimeDiff = timeDiff;
+        bestMatch = cs.sessionId;
+      }
+    }
+    if (bestMatch) {
+      map.get(bestMatch)!.codexSessions.push(codex);
+    }
+  }
+  return map;
+}
+
+function readSubagentLabels(projectsDir: string, projectDir: string, sessionId: string, count: number): string[] {
+  if (count === 0) { return []; }
+  const labels: string[] = [];
+  try {
+    const subagentDir = path.join(projectsDir, projectDir, sessionId, 'subagents');
+    const files = fs.readdirSync(subagentDir).filter(f => f.endsWith('.jsonl')).sort();
+    for (const file of files) {
+      const fallback = `Agent ${labels.length + 1}`;
+      try {
+        const fp = path.join(subagentDir, file);
+        const stat = fs.statSync(fp);
+        const cached = subagentLabelCache.get(fp);
+        if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
+          labels.push(cached.label || fallback);
+          continue;
+        }
+        const fd = fs.openSync(fp, 'r');
+        try {
+          const buf = Buffer.alloc(Math.min(4096, stat.size));
+          fs.readSync(fd, buf, 0, buf.length, 0);
+          const text = buf.toString('utf8');
+          const label = extractSubagentLabel(text);
+          if (subagentLabelCache.size > MAX_SUBAGENT_LABEL_CACHE_ENTRIES) {
+            subagentLabelCache.clear();
+          }
+          subagentLabelCache.set(fp, { mtimeMs: stat.mtimeMs, size: stat.size, label });
+          labels.push(label || fallback);
+        } finally { fs.closeSync(fd); }
+      } catch { labels.push(fallback); }
+    }
+  } catch { /* subagent dir doesn't exist */ }
+  return labels;
+}
+
+function extractSubagentLabel(text: string): string {
+  const firstLine = text.split(/\r?\n/)[0] || '';
+  try {
+    const data = JSON.parse(firstLine);
+    if (data.type === 'user') {
+      const content = data.message?.content;
+      if (typeof content === 'string') {
+        return content.replace(/\s+/g, ' ').trim().substring(0, 60);
+      }
+      if (Array.isArray(content)) {
+        for (const block of content) {
+          if (block?.type === 'text' && typeof block.text === 'string') {
+            return block.text.replace(/\s+/g, ' ').trim().substring(0, 60);
+          }
+        }
+      }
+    }
+  } catch { /* JSON parse failed — line truncated, try pattern extraction */ }
+  const marker = '"content":"';
+  const idx = firstLine.indexOf(marker);
+  if (idx === -1) { return ''; }
+  const start = idx + marker.length;
+  let result = '';
+  for (let i = start; i < firstLine.length && result.length < 80; i++) {
+    const ch = firstLine[i];
+    if (ch === '"') { break; }
+    if (ch === '\\' && i + 1 < firstLine.length) {
+      const next = firstLine[i + 1];
+      if (next === 'n' || next === 't' || next === 'r') { result += ' '; i++; continue; }
+      if (next === '"') { result += '"'; i++; continue; }
+      result += next; i++; continue;
+    }
+    result += ch;
+  }
+  return result.replace(/\s+/g, ' ').trim().substring(0, 60);
+}
+
+function encodePathLikeClaude(fsPath: string): string {
+  return fsPath.replace(/[\/\\]+$/, '').replace(/[:\/\\]/g, '-');
+}
+
+function matchKey(encoded: string): string {
+  const normalized = encoded.normalize('NFC');
+  return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
+}
+
+function getEncodedAncestors(fsPath: string): Set<string> {
+  const candidates = new Set<string>();
+  let current = fsPath.replace(/[\/\\]+$/, '');
+  const variants = [current];
+  try { variants.push(fs.realpathSync.native(current)); } catch { /* ignore */ }
+  for (const variant of variants) {
+    let p = variant;
+    while (true) {
+      candidates.add(matchKey(encodePathLikeClaude(p)));
+      const parent = path.dirname(p);
+      if (parent === p) { break; }
+      p = parent;
+    }
+  }
+  return candidates;
+}
 // ─── Hook Setup/Remove ───
 
 const HOOK_ID = 'claude-code-vitals';

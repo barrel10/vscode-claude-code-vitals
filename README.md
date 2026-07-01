@@ -82,6 +82,18 @@ Aggregated stats across all sessions.
 | Cleanup | Days until Claude Code auto-deletes the oldest session (`cleanupPeriodDays`, default 30) |
 | Updated | Most recent session update |
 
+## Agent Graph Panel
+
+Visualizes the running session as a live node graph: the Claude session is the parent node, and spawned subagents and Codex CLI runs appear as child nodes.
+
+| Element | Description |
+|---------|-------------|
+| Claude node | Blue pulsing = thinking, yellow = waiting, gray = idle. Click to focus the session |
+| Subagent node | Blue pulsing while active; the task prompt is shown as tooltip. Completed agents collapse into a `N done` count |
+| Codex node | Green while running, shown for 5 minutes after completion. Click to open the rollout transcript |
+
+Codex CLI sessions are detected from rollout files under `~/.codex/sessions` (or `CODEX_HOME`) and matched to Claude sessions by working directory. The sidebar shows the focused or most recently active session; the title bar icon opens a full-screen editor view with all active sessions. Selecting a session in the Sessions panel focuses its graph.
+
 ## Sort & Filter
 
 Available from the Sessions view title bar menu (`...`).

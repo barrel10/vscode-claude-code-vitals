@@ -667,8 +667,8 @@ function parseSubagentUsage(
   try {
     const sessionId = path.basename(sessionFilePath, '.jsonl');
     const subagentDir = path.join(path.dirname(sessionFilePath), sessionId, 'subagents');
-    for (const file of fs.readdirSync(subagentDir)) {
-      if (!file.endsWith('.jsonl')) { continue; }
+    const files = fs.readdirSync(subagentDir).filter(file => file.endsWith('.jsonl')).sort();
+    for (const file of files) {
       const fp = path.join(subagentDir, file);
       try {
         const stat = fs.statSync(fp);

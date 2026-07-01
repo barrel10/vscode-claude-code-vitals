@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.7.0 (2026-07-02)
+
+### Added
+- Agent Graph view: a new activity bar panel that visualizes the running Claude session as a live node graph, with spawned subagents and Codex CLI runs as child nodes (status colors, prompt tooltips, click-to-focus)
+- Codex CLI session detection: rollout files under `~/.codex/sessions` (or `CODEX_HOME`) are parsed and matched to Claude sessions by working directory
+- Full-screen graph view in an editor tab (view title icon) showing all active sessions
+- Selecting a session in the Sessions panel focuses its graph
+
+### Performance
+- Codex rollout headers and subagent labels are cached (mtime+size keyed), and rollout headers read at most the leading 256 KB of the file, so refreshes no longer re-read unchanged or large files
+
 ## 1.6.1 (2026-06-29)
 
 ### Fixed

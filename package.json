@@ -2,7 +2,7 @@
   "name": "claude-code-vitals",
   "displayName": "Claude Code Vitals",
   "description": "Real-time session status detection, multi-session management, and compact tracking for Claude Code",
-  "version": "1.6.1",
+  "version": "1.7.0",
   "publisher": "barrel1054",
   "license": "MIT",
   "repository": {
@@ -43,6 +43,11 @@
         {
           "id": "claudeCodeVitalsOverviewView",
           "name": "Overview"
+        },
+        {
+          "id": "claudeCodeVitalsGraphView",
+          "name": "Agent Graph",
+          "type": "webview"
         }
       ]
     },
@@ -51,6 +56,16 @@
         "command": "claude-code-vitals.refresh",
         "title": "Refresh",
         "icon": "$(refresh)"
+      },
+      {
+        "command": "claude-code-vitals.refreshGraph",
+        "title": "Refresh Agent Graph",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "claude-code-vitals.openGraphInEditor",
+        "title": "Open Agent Graph in Editor",
+        "icon": "$(screen-full)"
       },
       {
         "command": "claude-code-vitals.sortByTime",
@@ -220,6 +235,16 @@
           "command": "claude-code-vitals.manageGroups",
           "when": "view == claudeCodeVitalsSessionView",
           "group": "4_group@5"
+        },
+        {
+          "command": "claude-code-vitals.refreshGraph",
+          "when": "view == claudeCodeVitalsGraphView",
+          "group": "navigation"
+        },
+        {
+          "command": "claude-code-vitals.openGraphInEditor",
+          "when": "view == claudeCodeVitalsGraphView",
+          "group": "navigation"
         }
       ]
     },
