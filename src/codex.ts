@@ -17,15 +17,17 @@ export interface CodexSessionInfo {
 const CODEX_HOME = process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
 const MAX_HEADER_LINES = 10;
 const MAX_HEADER_BYTES = 256 * 1024;
+const MAX_TAIL_BYTES = 8 * 1024;
+const MAX_TAIL_CHUNKS = 4;
 const MAX_HEADER_CACHE_ENTRIES = 1000;
-const RUNNING_THRESHOLD_MS = 120_000;
+const UNTERMINATED_RUNNING_LIMIT_MS = 30 * 60_000;
 
 let _log: (msg: string) => void = () => {};
 export function setCodexLogger(logger: (msg: string) => void): void { _log = logger; }
 
 type CachedCodexHeader = Omit<CodexSessionInfo, 'status'>;
 
-const headerCache = new Map<string, { mtimeMs: number; size: number; header: CachedCodexHeader }>();
+const headerCache = new Map<string, { mtimeMs: number; size: number; header: CachedCodexHeader; terminated: boolean }>();
 
 export function getCodexSessionsDir(): string {
   return path.join(CODEX_HOME, 'sessions');
@@ -61,34 +63,86 @@ export function parseCodexRolloutHeader(filePath: string): CodexSessionInfo | nu
     const stat = fs.statSync(filePath);
     const cached = headerCache.get(filePath);
     if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
-      return withCurrentStatus(cached.header);
+      return withCurrentStatus(cached.header, cached.terminated);
     }
     const lines = readHeaderLines(filePath, MAX_HEADER_LINES);
-    const parsed = parseHeaderLines(lines, filePath, stat.mtimeMs);
-    if (!parsed) { return null; }
-    const { status: _status, ...header } = parsed;
+    const header = parseHeaderLines(lines, filePath, stat.mtimeMs);
+    if (!header) { return null; }
+    const terminated = isRolloutTerminated(filePath, stat.size);
     if (headerCache.size > MAX_HEADER_CACHE_ENTRIES) {
       headerCache.clear();
     }
-    headerCache.set(filePath, { mtimeMs: stat.mtimeMs, size: stat.size, header });
-    return parsed;
+    headerCache.set(filePath, { mtimeMs: stat.mtimeMs, size: stat.size, header, terminated });
+    return withCurrentStatus(header, terminated);
   } catch {
     return null;
   }
 }
 
-function withCurrentStatus(header: CachedCodexHeader): CodexSessionInfo {
+function withCurrentStatus(header: CachedCodexHeader, terminated: boolean): CodexSessionInfo {
   return {
     sessionId: header.sessionId,
     startTime: header.startTime,
     cwd: header.cwd,
     model: header.model,
-    status: Date.now() - header.mtimeMs < RUNNING_THRESHOLD_MS ? 'running' : 'completed',
+    status: terminated
+      ? 'completed'
+      : Date.now() - header.mtimeMs < UNTERMINATED_RUNNING_LIMIT_MS ? 'running' : 'completed',
     prompt: header.prompt,
     subcommand: header.subcommand,
     filePath: header.filePath,
     mtimeMs: header.mtimeMs,
   };
+}
+// The tail window may cut the leading line in half at its start boundary.
+// When that truncated line can't be parsed and more of the file remains,
+// re-read with a larger window (up to MAX_TAIL_CHUNKS chunks) so the
+// decisive event isn't missed just because it straddled a chunk boundary.
+function isRolloutTerminated(filePath: string, size: number): boolean {
+  if (size <= 0) { return false; }
+
+  const fd = fs.openSync(filePath, 'r');
+  try {
+    for (let chunkCount = 1; chunkCount <= MAX_TAIL_CHUNKS; chunkCount++) {
+      const bytesToRead = Math.min(size, MAX_TAIL_BYTES * chunkCount);
+      const start = size - bytesToRead;
+      const buffer = Buffer.alloc(bytesToRead);
+      const bytesRead = fs.readSync(fd, buffer, 0, bytesToRead, start);
+      const content = buffer.toString('utf8', 0, bytesRead);
+      const lines = content.split(/\r?\n/);
+
+      let needsLargerWindow = false;
+      for (let i = lines.length - 1; i >= 0; i--) {
+        const line = lines[i].trim();
+        if (!line) { continue; }
+
+        let data: any;
+        try {
+          data = JSON.parse(line);
+        } catch {
+          if (i === 0 && start > 0 && chunkCount < MAX_TAIL_CHUNKS) {
+            needsLargerWindow = true;
+            break;
+          }
+          continue;
+        }
+
+        if (data.type === 'event_msg') {
+          const payloadType = data.payload?.type;
+          if (payloadType === 'token_count') { continue; }
+          return payloadType === 'task_complete' || payloadType === 'turn_aborted' || payloadType === 'error';
+        }
+
+        return false;
+      }
+
+      if (!needsLargerWindow) { return false; }
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
+
+  return false;
 }
 
 // Rollout files can grow to tens of MB; read only the leading bytes needed
@@ -136,7 +190,7 @@ function collectRolloutFiles(dirPath: string, cutoff: number, out: string[]): vo
   }
 }
 
-function parseHeaderLines(lines: string[], filePath: string, mtimeMs: number): CodexSessionInfo | null {
+function parseHeaderLines(lines: string[], filePath: string, mtimeMs: number): CachedCodexHeader | null {
   let sessionId = '';
   let startTime = 0;
   let cwd = '';
@@ -194,7 +248,6 @@ function parseHeaderLines(lines: string[], filePath: string, mtimeMs: number): C
     startTime,
     cwd,
     model,
-    status: Date.now() - mtimeMs < RUNNING_THRESHOLD_MS ? 'running' : 'completed',
     prompt,
     subcommand,
     filePath,

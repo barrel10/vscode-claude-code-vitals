@@ -21,6 +21,7 @@ const DIRTY_QUEUE_EXTEND_THRESHOLD = 100;
 const DIRTY_QUEUE_FULL_RECONCILE_THRESHOLD = 10_000;
 const MAX_JSONL_WATCHERS = 50;
 const MAX_SUBAGENT_LABEL_CACHE_ENTRIES = 1000;
+const MAX_CODEX_ASSIGNMENT_CACHE_ENTRIES = 1000;
 
 
 function getPollIntervalMs(): number {
@@ -48,6 +49,7 @@ interface SubagentLabelCacheEntry {
 }
 
 const subagentLabelCache = new Map<string, SubagentLabelCacheEntry>();
+const codexSessionAssignments = new Map<string, string>();
 
 // ─── Activate ───
 
@@ -263,6 +265,9 @@ export function activate(context: vscode.ExtensionContext) {
       const codexSessions = findRecentCodexSessions(inactiveHours);
       const graphDataMap = correlateCodexSessions(sessions, codexSessions, projectsDir);
       graphProvider.update(sessions, graphDataMap);
+
+      const debugGraphStateFile = config.get<string>('debugGraphStateFile', '');
+      if (debugGraphStateFile) { writeGraphDebugState(debugGraphStateFile, sessions, graphDataMap); }
 
       overviewProvider.update(sessions, settings);
 
@@ -481,6 +486,34 @@ export function activate(context: vscode.ExtensionContext) {
 
 export function deactivate() {}
 
+// Debug hook: mirrors the exact data handed to the graph view so external
+// tooling can observe what the UI displays. Enabled only when the
+// (undeclared) setting claudeCodeVitals.debugGraphStateFile is set.
+function writeGraphDebugState(filePath: string, sessions: SessionInfo[], graphDataMap: Map<string, GraphData>): void {
+  try {
+    const now = Date.now();
+    const state = {
+      timestamp: new Date().toISOString(),
+      sessions: sessions.map(s => ({
+        sessionId: s.sessionId,
+        name: s.sessionName,
+        status: s.status,
+        displayAgeSec: Math.round((now - s.displayMtimeMs) / 1000),
+        activeAgents: s.activeAgentCount,
+        totalAgents: s.totalAgentCount,
+        codex: (graphDataMap.get(s.sessionId)?.codexSessions || []).map(c => ({
+          sessionId: c.sessionId,
+          status: c.status,
+          subcommand: c.subcommand,
+          silenceSec: Math.round((now - c.mtimeMs) / 1000),
+          prompt: c.prompt.slice(0, 60),
+        })),
+      })),
+    };
+    fs.writeFileSync(filePath, JSON.stringify(state, null, 2));
+  } catch (e) { log(`graph debug dump failed: ${e}`); }
+}
+
 function correlateCodexSessions(
   claudeSessions: SessionInfo[],
   codexSessions: CodexSessionInfo[],
@@ -498,6 +531,15 @@ function correlateCodexSessions(
     });
   }
   for (const codex of codexSessions) {
+    const assignedSessionId = codexSessionAssignments.get(codex.sessionId);
+    if (assignedSessionId && map.has(assignedSessionId)) {
+      map.get(assignedSessionId)!.codexSessions.push(codex);
+      continue;
+    }
+    if (assignedSessionId) {
+      codexSessionAssignments.delete(codex.sessionId);
+    }
+
     const candidates = getEncodedAncestors(codex.cwd);
     let bestMatch: string | null = null;
     let bestLen = -1;
@@ -513,6 +555,10 @@ function correlateCodexSessions(
       }
     }
     if (bestMatch) {
+      if (codexSessionAssignments.size > MAX_CODEX_ASSIGNMENT_CACHE_ENTRIES) {
+        codexSessionAssignments.clear();
+      }
+      codexSessionAssignments.set(codex.sessionId, bestMatch);
       map.get(bestMatch)!.codexSessions.push(codex);
     }
   }

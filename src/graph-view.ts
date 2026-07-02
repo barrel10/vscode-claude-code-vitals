@@ -150,6 +150,19 @@ export class GraphWebviewProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  private hasRunningCodex(sessionId: string): boolean {
+    const graph = this.graphDataMap.get(sessionId);
+    return !!graph?.codexSessions.some(c => c.status === 'running');
+  }
+
+  private latestRunningCodexMtime(sessionId: string): number {
+    const graph = this.graphDataMap.get(sessionId);
+    if (!graph) { return 0; }
+    return graph.codexSessions
+      .filter(c => c.status === 'running')
+      .reduce((max, c) => Math.max(max, c.mtimeMs), 0);
+  }
+
   private getSessionsForSidebar(): SessionInfo[] {
     if (this.focusedSessionId) {
       const focused = this.sessions.find(s => s.sessionId === this.focusedSessionId);
@@ -159,9 +172,11 @@ export class GraphWebviewProvider implements vscode.WebviewViewProvider {
       .filter(s => s.status === 'thinking')
       .sort((a, b) => b.displayMtimeMs - a.displayMtimeMs);
     if (thinking.length > 0) { return [thinking[0]]; }
+    const recentSortKey = (s: SessionInfo): number =>
+      Math.max(s.displayMtimeMs, this.latestRunningCodexMtime(s.sessionId));
     const recent = [...this.sessions]
-      .filter(s => s.status !== 'inactive')
-      .sort((a, b) => b.displayMtimeMs - a.displayMtimeMs);
+      .filter(s => s.status !== 'inactive' || this.hasRunningCodex(s.sessionId))
+      .sort((a, b) => recentSortKey(b) - recentSortKey(a));
     return recent.length > 0 ? [recent[0]] : [];
   }
 
@@ -169,7 +184,8 @@ export class GraphWebviewProvider implements vscode.WebviewViewProvider {
     return this.sessions.filter(s => {
       const graph = this.graphDataMap.get(s.sessionId);
       const hasCodex = (graph?.codexSessions.length || 0) > 0;
-      return s.status !== 'inactive' && (
+      const hasRunningCodex = this.hasRunningCodex(s.sessionId);
+      return (s.status !== 'inactive' || hasRunningCodex) && (
         s.status === 'thinking' ||
         s.totalAgentCount > 0 ||
         s.isActiveTurn ||

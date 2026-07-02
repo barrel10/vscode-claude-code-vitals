@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.7.1 (2026-07-03)
+
+### Fixed
+- Codex nodes no longer disappear or turn gray mid-run while the CLI stays silent during long shell commands: sessions without a completion event in their rollout now count as running for up to 30 minutes, instead of requiring a file write within the last 2 minutes
+- Codex nodes now turn gray within seconds of the process finishing (completion events `task_complete` / `turn_aborted` / `error` are detected from the rollout tail), instead of up to 2 minutes later
+- Codex nodes no longer jump between Claude sessions of the same project: the session assignment is decided once and kept stable
+- Sessions with a running Codex child stay visible in the Agent Graph (sidebar and full-screen view) even after the Claude session itself goes idle
+
 ## 1.7.0 (2026-07-02)
 
 ### Added
