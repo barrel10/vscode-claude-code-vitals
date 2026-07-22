@@ -2,13 +2,19 @@ import * as vscode from 'vscode';
 import { CodexSessionInfo } from './codex';
 import { SessionInfo, SessionStatus } from './sessions';
 
+export interface SubagentMeta {
+  label: string;
+  description: string;
+  model: string | null;
+}
+
 export interface GraphData {
   claudeSessionId: string;
   codexSessions: CodexSessionInfo[];
   subagentCount: number;
   activeSubagentCount: number;
   subagentTimestamps: number[];
-  subagentLabels: string[];
+  subagentMeta: SubagentMeta[];
 }
 
 interface GraphNode {
@@ -47,7 +53,8 @@ const GROUP_GAP = 60;
 const PADDING = 40;
 const PARENT_Y = 50;
 const CHILD_Y = 150;
-const ACTIVE_MS = 15_000;
+const ACTIVE_AGENT_MS = 15_000;
+const RECENT_AGENT_MS = 5 * 60 * 1000;
 
 function escapeHtml(text: string): string {
   return text
@@ -320,23 +327,27 @@ ${nodes}
         subagentCount: session.totalAgentCount,
         activeSubagentCount: session.activeAgentCount,
         subagentTimestamps: session._agentTimestamps,
-        subagentLabels: [],
+        subagentMeta: [],
       };
 
       const now = Date.now();
       const activeAgentIndices: number[] = [];
+      const recentAgentIndices: number[] = [];
       for (let i = 0; i < graph.subagentCount; i++) {
         const ts = graph.subagentTimestamps[i] || 0;
-        if (now - ts < ACTIVE_MS) { activeAgentIndices.push(i); }
+        const age = now - ts;
+        if (age < ACTIVE_AGENT_MS) { activeAgentIndices.push(i); }
+        else if (age < RECENT_AGENT_MS) { recentAgentIndices.push(i); }
       }
       const RECENT_CODEX_MS = 5 * 60 * 1000;
       const visibleCodex = graph.codexSessions.filter(c =>
         c.status === 'running' || (now - c.mtimeMs < RECENT_CODEX_MS)
       );
-      const doneAgents = graph.subagentCount - activeAgentIndices.length;
+      const doneAgents = graph.subagentCount - activeAgentIndices.length - recentAgentIndices.length;
       const doneCodex = graph.codexSessions.length - visibleCodex.length;
 
-      const activeChildCount = activeAgentIndices.length + visibleCodex.length;
+      const visibleAgentCount = activeAgentIndices.length + recentAgentIndices.length;
+      const activeChildCount = visibleAgentCount + visibleCodex.length;
       const childWidth = activeChildCount > 0 ? activeChildCount * childW + (activeChildCount - 1) * childG : 0;
 
       const sublabelParts: string[] = [session.model];
@@ -367,15 +378,19 @@ ${nodes}
 
       if (activeChildCount > 0) {
         let childX = parentX - childWidth / 2 + childW / 2;
-        for (const i of activeAgentIndices) {
+        const visibleAgents: [number, 'active' | 'completed'][] = [
+          ...activeAgentIndices.map(i => [i, 'active'] as [number, 'active']),
+          ...recentAgentIndices.map(i => [i, 'completed'] as [number, 'completed']),
+        ];
+        for (const [i, status] of visibleAgents) {
           const childId = `subagent:${session.sessionId}:${i}`;
-          const agentDesc = graph.subagentLabels[i] || `Agent ${i + 1}`;
+          const meta = graph.subagentMeta[i];
           nodes.push({
             id: childId, type: 'subagent',
-            label: `Agent ${i + 1}`,
-            sublabel: session.model,
-            tooltip: agentDesc,
-            status: 'active', x: childX, y: childY,
+            label: meta?.label || `Agent ${i + 1}`,
+            sublabel: meta?.model || session.model,
+            tooltip: meta?.description || meta?.label || `Agent ${i + 1}`,
+            status, x: childX, y: childY,
           });
           edges.push({ from: parentId, to: childId });
           childX += childW + childG;

@@ -9,7 +9,7 @@ import {
   findUnknownPricingModels, SessionInfo,
 } from './sessions';
 import { SessionWebviewProvider, OverviewTreeProvider } from './views';
-import { GraphWebviewProvider, GraphData } from './graph-view';
+import { GraphWebviewProvider, GraphData, SubagentMeta } from './graph-view';
 import { findRecentCodexSessions, getCodexSessionsDir, setCodexLogger, CodexSessionInfo } from './codex';
 import { fetchRateLimits, startCredentialsWatch, stopCredentialsWatch } from './ratelimit';
 
@@ -20,7 +20,7 @@ const EXTENDED_DEBOUNCE_MS = 1000;
 const DIRTY_QUEUE_EXTEND_THRESHOLD = 100;
 const DIRTY_QUEUE_FULL_RECONCILE_THRESHOLD = 10_000;
 const MAX_JSONL_WATCHERS = 50;
-const MAX_SUBAGENT_LABEL_CACHE_ENTRIES = 1000;
+const MAX_SUBAGENT_META_CACHE_ENTRIES = 1000;
 const MAX_CODEX_ASSIGNMENT_CACHE_ENTRIES = 1000;
 
 
@@ -42,13 +42,14 @@ interface UsageDataPoint {
 }
 type UsageHistory = Record<string, UsageDataPoint[]>;
 
-interface SubagentLabelCacheEntry {
+interface SubagentMetaCacheEntry {
   mtimeMs: number;
   size: number;
-  label: string;
+  metaMtimeMs: number;
+  meta: SubagentMeta;
 }
 
-const subagentLabelCache = new Map<string, SubagentLabelCacheEntry>();
+const subagentMetaCache = new Map<string, SubagentMetaCacheEntry>();
 const codexSessionAssignments = new Map<string, string>();
 
 // ─── Activate ───
@@ -527,7 +528,7 @@ function correlateCodexSessions(
       subagentCount: cs.totalAgentCount,
       activeSubagentCount: cs.activeAgentCount,
       subagentTimestamps: cs._agentTimestamps,
-      subagentLabels: readSubagentLabels(projectsDir, cs.projectDir, cs.sessionId, cs.totalAgentCount),
+      subagentMeta: readSubagentMeta(projectsDir, cs.projectDir, cs.sessionId, cs.totalAgentCount),
     });
   }
   for (const codex of codexSessions) {
@@ -565,75 +566,103 @@ function correlateCodexSessions(
   return map;
 }
 
-function readSubagentLabels(projectsDir: string, projectDir: string, sessionId: string, count: number): string[] {
+function readSubagentMeta(projectsDir: string, projectDir: string, sessionId: string, count: number): SubagentMeta[] {
   if (count === 0) { return []; }
-  const labels: string[] = [];
+  const results: SubagentMeta[] = [];
   try {
     const subagentDir = path.join(projectsDir, projectDir, sessionId, 'subagents');
     const files = fs.readdirSync(subagentDir).filter(f => f.endsWith('.jsonl')).sort();
     for (const file of files) {
-      const fallback = `Agent ${labels.length + 1}`;
+      const idx = results.length + 1;
       try {
         const fp = path.join(subagentDir, file);
         const stat = fs.statSync(fp);
-        const cached = subagentLabelCache.get(fp);
-        if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
-          labels.push(cached.label || fallback);
+        const metaPath = fp.replace(/\.jsonl$/, '.meta.json');
+        let metaMtimeMs = 0;
+        try { metaMtimeMs = fs.statSync(metaPath).mtimeMs; } catch { /* no meta.json yet */ }
+
+        const cached = subagentMetaCache.get(fp);
+        if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size && cached.metaMtimeMs === metaMtimeMs) {
+          results.push(cached.meta);
           continue;
         }
-        const fd = fs.openSync(fp, 'r');
-        try {
-          const buf = Buffer.alloc(Math.min(4096, stat.size));
-          fs.readSync(fd, buf, 0, buf.length, 0);
-          const text = buf.toString('utf8');
-          const label = extractSubagentLabel(text);
-          if (subagentLabelCache.size > MAX_SUBAGENT_LABEL_CACHE_ENTRIES) {
-            subagentLabelCache.clear();
-          }
-          subagentLabelCache.set(fp, { mtimeMs: stat.mtimeMs, size: stat.size, label });
-          labels.push(label || fallback);
-        } finally { fs.closeSync(fd); }
-      } catch { labels.push(fallback); }
+
+        let meta: SubagentMeta = { label: `Agent ${idx}`, description: '', model: null };
+
+        if (metaMtimeMs > 0) {
+          try {
+            const raw = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+            const name = typeof raw.name === 'string' ? raw.name : '';
+            const desc = typeof raw.description === 'string' ? raw.description : '';
+            const agentType = typeof raw.agentType === 'string' ? raw.agentType : '';
+            const model = typeof raw.model === 'string' ? raw.model : null;
+            const promptDesc = desc ? '' : extractSubagentLabel(fp, stat.size);
+            meta = {
+              label: name || agentType || `Agent ${idx}`,
+              description: desc || promptDesc || name || agentType || `Agent ${idx}`,
+              model,
+            };
+          } catch { /* partial write — fall through to JSONL extraction */ }
+        }
+
+        if (!meta.description || meta.description === meta.label) {
+          const desc = extractSubagentLabel(fp, stat.size);
+          if (desc) { meta.description = desc; }
+        }
+
+        if (subagentMetaCache.size > MAX_SUBAGENT_META_CACHE_ENTRIES) {
+          subagentMetaCache.clear();
+        }
+        subagentMetaCache.set(fp, { mtimeMs: stat.mtimeMs, size: stat.size, metaMtimeMs, meta });
+        results.push(meta);
+      } catch { results.push({ label: `Agent ${idx}`, description: '', model: null }); }
     }
   } catch { /* subagent dir doesn't exist */ }
-  return labels;
+  return results;
 }
 
-function extractSubagentLabel(text: string): string {
-  const firstLine = text.split(/\r?\n/)[0] || '';
+function extractSubagentLabel(fp: string, fileSize: number): string {
+  let fd: number | null = null;
   try {
-    const data = JSON.parse(firstLine);
-    if (data.type === 'user') {
-      const content = data.message?.content;
-      if (typeof content === 'string') {
-        return content.replace(/\s+/g, ' ').trim().substring(0, 60);
-      }
-      if (Array.isArray(content)) {
-        for (const block of content) {
-          if (block?.type === 'text' && typeof block.text === 'string') {
-            return block.text.replace(/\s+/g, ' ').trim().substring(0, 60);
+    fd = fs.openSync(fp, 'r');
+    const buf = Buffer.alloc(Math.min(4096, fileSize));
+    fs.readSync(fd, buf, 0, buf.length, 0);
+    const firstLine = buf.toString('utf8').split(/\r?\n/)[0] || '';
+    try {
+      const data = JSON.parse(firstLine);
+      if (data.type === 'user') {
+        const content = data.message?.content;
+        if (typeof content === 'string') {
+          return content.replace(/\s+/g, ' ').trim().substring(0, 60);
+        }
+        if (Array.isArray(content)) {
+          for (const block of content) {
+            if (block?.type === 'text' && typeof block.text === 'string') {
+              return block.text.replace(/\s+/g, ' ').trim().substring(0, 60);
+            }
           }
         }
       }
+    } catch { /* JSON parse failed */ }
+    const marker = '"content":"';
+    const idx = firstLine.indexOf(marker);
+    if (idx === -1) { return ''; }
+    const start = idx + marker.length;
+    let result = '';
+    for (let i = start; i < firstLine.length && result.length < 80; i++) {
+      const ch = firstLine[i];
+      if (ch === '"') { break; }
+      if (ch === '\\' && i + 1 < firstLine.length) {
+        const next = firstLine[i + 1];
+        if (next === 'n' || next === 't' || next === 'r') { result += ' '; i++; continue; }
+        if (next === '"') { result += '"'; i++; continue; }
+        result += next; i++; continue;
+      }
+      result += ch;
     }
-  } catch { /* JSON parse failed — line truncated, try pattern extraction */ }
-  const marker = '"content":"';
-  const idx = firstLine.indexOf(marker);
-  if (idx === -1) { return ''; }
-  const start = idx + marker.length;
-  let result = '';
-  for (let i = start; i < firstLine.length && result.length < 80; i++) {
-    const ch = firstLine[i];
-    if (ch === '"') { break; }
-    if (ch === '\\' && i + 1 < firstLine.length) {
-      const next = firstLine[i + 1];
-      if (next === 'n' || next === 't' || next === 'r') { result += ' '; i++; continue; }
-      if (next === '"') { result += '"'; i++; continue; }
-      result += next; i++; continue;
-    }
-    result += ch;
-  }
-  return result.replace(/\s+/g, ' ').trim().substring(0, 60);
+    return result.replace(/\s+/g, ' ').trim().substring(0, 60);
+  } catch { return ''; }
+  finally { if (fd !== null) { fs.closeSync(fd); } }
 }
 
 function encodePathLikeClaude(fsPath: string): string {

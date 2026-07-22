@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.7.2 (2026-07-23)
+
+### Fixed
+- Subagent labels now show the agent name and description from `.meta.json` sidecar files (e.g. "sleep-analysis" / "Fable fixes R4 Critical 2") instead of raw prompt text
+- Agent Graph nodes now remain visible for 5 minutes after completion with a faded style, instead of disappearing after 15 seconds
+- Agent Graph sublabel shows the agent's own model (e.g. "fable") when specified, rather than always inheriting the parent session's model
+- Subagent metadata cache now includes `.meta.json` mtime in its invalidation key, so late-created or updated sidecar files are picked up without restarting the extension
+
 ## 1.7.1 (2026-07-03)
 
 ### Fixed
