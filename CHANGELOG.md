@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.8.0 (2026-07-25)
+
+### Added
+- Claude Opus 5 support: recognized as a 1M-context model (1M is its documented default and maximum, not something the `[1m]` suffix has to unlock), priced at $5/$25 per MTok, with a 128K default max output
+
+### Changed
+- Agent Graph is now a hierarchical list instead of an SVG node graph. Parent and children are related by indentation and a left rule, so the panel grows downward instead of sideways and no longer needs horizontal scrolling in a narrow sidebar
+- The editor view lays sessions out in columns that reflow with the window width, instead of placing them in one ever-widening row
+- Completed subagents and Codex runs now stay in the list instead of disappearing after 5 minutes. Running children are listed first, then completed ones by most recent activity, capped at 8 rows in the sidebar and 30 in the editor view with a `+N more` row for the remainder
+- Session rows now show how many children are running out of the total, plus context usage; Codex rows show the subcommand, model, and elapsed time
+
+### Security
+- `claudeCodeVitals.enableHookDetection` is now `machine` scope. It was previously settable per workspace, so opening a repository whose `.vscode/settings.json` enabled it would install the hook script into `~/.claude/hooks/` and rewrite `~/.claude/settings.local.json` with no further action from you. Only your user or machine settings can turn it on now
+- `claudeCodeVitals.debugGraphStateFile`, added in 1.7.1 as an undeclared setting, is now declared with `machine` scope. Previously a workspace's `.vscode/settings.json` could point the debug dump at any writable file and the extension would overwrite it on every refresh
+
 ## 1.7.2 (2026-07-23)
 
 ### Fixed

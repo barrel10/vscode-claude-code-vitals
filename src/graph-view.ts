@@ -1,11 +1,13 @@
 import * as vscode from 'vscode';
 import { CodexSessionInfo } from './codex';
-import { SessionInfo, SessionStatus } from './sessions';
+import { SessionInfo, formatRelativeTime, shortenModel } from './sessions';
 
 export interface SubagentMeta {
   label: string;
   description: string;
   model: string | null;
+  /** Last activity of this subagent (JSONL file mtime). 0 = unknown. */
+  lastActivityMs: number;
 }
 
 export interface GraphData {
@@ -13,48 +15,149 @@ export interface GraphData {
   codexSessions: CodexSessionInfo[];
   subagentCount: number;
   activeSubagentCount: number;
+  /**
+   * Subagent activity times (SessionInfo._agentTimestamps). Supplied either from
+   * agent_progress records in the main JSONL or from subagents/ file mtimes. Even the
+   * mtime case is a separate scan from subagentMeta's, not a shared one: a failed statSync
+   * drops the entry here but yields a placeholder in readSubagentMeta, and this array can
+   * be a cached one from an earlier scan. Index correspondence with subagentMeta is
+   * therefore never guaranteed and must not be assumed.
+   */
   subagentTimestamps: number[];
   subagentMeta: SubagentMeta[];
 }
 
-interface GraphNode {
-  id: string;
-  type: 'claude' | 'subagent' | 'codex';
-  label: string;
-  sublabel: string;
-  status: 'active' | 'idle' | 'completed';
-  x: number;
-  y: number;
-  w?: number;
-  tooltip?: string;
-  sessionId?: string;
+interface ChildRow {
+  kind: 'subagent' | 'codex';
+  primary: string;
+  secondary: string;
+  running: boolean;
+  lastActivityMs: number;
+  detail: string;
+  durationText?: string;
   filePath?: string;
-  visualStatus?: SessionStatus | 'running';
 }
 
-interface GraphEdge {
-  from: string;
-  to: string;
-}
-
-interface LayoutResult {
-  nodes: GraphNode[];
-  edges: GraphEdge[];
-  width: number;
-  height: number;
-}
-
-const CLAUDE_WIDTH = 160;
-const CLAUDE_HEIGHT = 50;
-const CHILD_WIDTH = 100;
-const CHILD_HEIGHT = 36;
-const CHILD_GAP = 16;
-const GROUP_GAP = 60;
-const PADDING = 40;
-const PARENT_Y = 50;
-const CHILD_Y = 150;
 const ACTIVE_AGENT_MS = 15_000;
-const RECENT_AGENT_MS = 5 * 60 * 1000;
+const SIDEBAR_COMPLETED_LIMIT = 8;
+const PANEL_COMPLETED_LIMIT = 30;
+
+const GRAPH_CSS = `
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  font-family: var(--vscode-font-family);
+  font-size: var(--vscode-font-size);
+  color: var(--vscode-foreground);
+  background: transparent;
+  user-select: none;
+}
+.graph { padding: 6px 4px; }
+.graph.fullscreen {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 12px;
+  align-items: start;
+  padding: 12px;
+}
+.session-block { min-width: 0; }
+.graph.fullscreen .session-block {
+  border: 1px solid var(--vscode-widget-border);
+  border-radius: 6px;
+  padding: 6px;
+}
+.parent-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 4px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.parent-row:hover { background: var(--vscode-list-hoverBackground); }
+.status-icon { font-size: 9px; line-height: 1; flex-shrink: 0; }
+.status-icon.thinking { color: var(--vscode-charts-blue); animation: pulse 2s ease-in-out infinite; }
+.status-icon.waiting { color: var(--vscode-charts-yellow); }
+.status-icon.idle { color: var(--vscode-descriptionForeground); opacity: .6; }
+.session-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+.model-badge { flex-shrink: 0; font-size: .8em; opacity: .7; }
+.child-summary { flex-shrink: 0; font-size: .8em; opacity: .7; }
+.context-pct { flex-shrink: 0; font-size: .8em; opacity: .85; }
+.children {
+  margin: 2px 0 6px 10px;
+  padding-left: 8px;
+  border-left: 1px solid var(--vscode-tree-indentGuidesStroke, var(--vscode-widget-border));
+}
+.child-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 2px 4px;
+  border-radius: 3px;
+}
+.child-row.codex { cursor: pointer; }
+.child-row.codex:hover { background: var(--vscode-list-hoverBackground); }
+.status-dot {
+  font-size: 7px;
+  line-height: 1;
+  flex-shrink: 0;
+  color: var(--vscode-descriptionForeground);
+  opacity: .5;
+}
+.child-row.subagent.running .status-dot {
+  color: var(--vscode-charts-blue);
+  opacity: 1;
+  animation: pulse 2s ease-in-out infinite;
+}
+.child-row.codex.running .status-dot {
+  color: var(--vscode-charts-green);
+  opacity: 1;
+  animation: pulse 2s ease-in-out infinite;
+}
+.child-main { flex: 1 1 auto; min-width: 0; }
+.child-line1 { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+.child-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: .9em;
+}
+.codex-badge {
+  flex-shrink: 0;
+  font-size: .75em;
+  padding: 0 4px;
+  border-radius: 3px;
+  border: 1px solid var(--vscode-widget-border);
+  color: var(--vscode-charts-green);
+}
+.child-row.codex:not(.running) .codex-badge { color: var(--vscode-descriptionForeground); }
+.child-model { flex-shrink: 0; font-size: .75em; opacity: .6; }
+.child-duration { flex-shrink: 0; font-size: .75em; opacity: .8; }
+.child-time { flex-shrink: 0; font-size: .75em; opacity: .6; margin-left: auto; }
+.child-line2 {
+  font-size: .75em;
+  opacity: .55;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.more-row { padding: 2px 4px; font-size: .75em; opacity: .5; }
+.empty { text-align: center; padding: 40px 12px; opacity: .5; }
+.empty-note { font-size: .8em; margin-top: 6px; }
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: .5; }
+}
+`;
 
 function escapeHtml(text: string): string {
   return text
@@ -70,6 +173,16 @@ function nonce(): string {
     'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
       .charAt(Math.floor(Math.random() * 62))
   ).join('');
+}
+
+function formatDuration(ms: number): string {
+  if (ms <= 0) { return '0s'; }
+  const s = Math.floor(ms / 1000);
+  if (s < 60) { return `${s}s`; }
+  const m = Math.floor(s / 60);
+  if (m < 60) { return s % 60 > 0 ? `${m}m ${s % 60}s` : `${m}m`; }
+  const h = Math.floor(m / 60);
+  return m % 60 > 0 ? `${h}h ${m % 60}m` : `${h}h`;
 }
 
 export class GraphWebviewProvider implements vscode.WebviewViewProvider {
@@ -213,283 +326,166 @@ export class GraphWebviewProvider implements vscode.WebviewViewProvider {
     this._panel.webview.html = this.buildHtml(sessions, nonce(), true);
   }
 
+  private buildChildRows(session: SessionInfo, graph: GraphData, now: number): ChildRow[] {
+    const rows: ChildRow[] = [];
+    for (let i = 0; i < graph.subagentCount; i++) {
+      const meta = graph.subagentMeta[i];
+      const label = meta?.label || `Agent ${i + 1}`;
+      // meta carries this row's own label/model/time, so prefer it — including a
+      // lastActivityMs of 0, which means "unknown" and must not be filled in from a list
+      // that may not be index-aligned. Only where meta is absent (subagentCount can exceed
+      // subagentMeta.length) is the row an unnamed "Agent N" placeholder, and the
+      // positional timestamp the best available signal.
+      const last = meta ? meta.lastActivityMs : (graph.subagentTimestamps[i] || 0);
+      rows.push({
+        kind: 'subagent',
+        primary: label,
+        secondary: shortenModel(meta?.model || session.model),
+        running: last > 0 && now - last < ACTIVE_AGENT_MS,
+        lastActivityMs: last,
+        detail: meta?.description || label,
+      });
+    }
+    for (const codex of graph.codexSessions) {
+      rows.push({
+        kind: 'codex',
+        primary: codex.subcommand,
+        // Codex model IDs (gpt-5-codex, gpt-5.1-codex-max, ...) are not Claude IDs, so
+        // shortenModel would collapse every one of them to "gpt". Show the raw value.
+        secondary: codex.model || '',
+        running: codex.status === 'running',
+        lastActivityMs: codex.mtimeMs,
+        detail: codex.prompt || codex.subcommand,
+        durationText: formatDuration(codex.mtimeMs - codex.startTime),
+        filePath: codex.filePath,
+      });
+    }
+    rows.sort((a, b) => {
+      if (a.running !== b.running) { return a.running ? -1 : 1; }
+      return b.lastActivityMs - a.lastActivityMs;
+    });
+    return rows;
+  }
+
+  private renderChildRow(row: ChildRow, fullscreen: boolean): string {
+    const stateText = row.running ? 'running' : 'completed';
+    const cls = `child-row ${row.kind}${row.running ? ' running' : ''}`;
+    const cmdAttr = row.kind === 'codex'
+      ? ` data-cmd="openCodexFile" data-path="${escapeHtml(row.filePath || '')}"`
+      : '';
+    const tipLines = [row.detail, `status: ${stateText}`];
+    if (row.lastActivityMs > 0) { tipLines.push(`last activity: ${formatRelativeTime(row.lastActivityMs)} ago`); }
+    if (row.durationText) { tipLines.push(`duration: ${row.durationText}`); }
+    const title = escapeHtml(tipLines.join('\n'));
+    const primary = row.kind === 'codex'
+      ? `<span class="codex-badge">${escapeHtml(row.primary)}</span>`
+      : `<span class="child-label">${escapeHtml(row.primary)}</span>`;
+    const model = row.secondary ? `<span class="child-model">${escapeHtml(row.secondary)}</span>` : '';
+    const duration = row.durationText ? `<span class="child-duration">${escapeHtml(row.durationText)}</span>` : '';
+    const time = row.lastActivityMs > 0
+      ? `<span class="child-time">${escapeHtml(formatRelativeTime(row.lastActivityMs))}</span>`
+      : '';
+    const line2 = fullscreen && row.detail
+      ? `<div class="child-line2">${escapeHtml(row.detail)}</div>`
+      : '';
+    return `<div class="${cls}"${cmdAttr} title="${title}" aria-label="${escapeHtml(`${row.primary} ${stateText}`)}">
+<span class="status-dot" aria-hidden="true">&#x25CF;</span>
+<div class="child-main"><div class="child-line1">${primary}${model}${duration}</div>${line2}</div>
+${time}
+</div>`;
+  }
+
+  private buildSessionBlock(session: SessionInfo, fullscreen: boolean, now: number): string {
+    const graph = this.graphDataMap.get(session.sessionId) || {
+      claudeSessionId: session.sessionId,
+      codexSessions: [],
+      subagentCount: session.totalAgentCount,
+      activeSubagentCount: session.activeAgentCount,
+      subagentTimestamps: session._agentTimestamps,
+      subagentMeta: [],
+    };
+    const rows = this.buildChildRows(session, graph, now);
+    const runningRows = rows.filter(r => r.running);
+    const completedRows = rows.filter(r => !r.running);
+    const limit = fullscreen ? PANEL_COMPLETED_LIMIT : SIDEBAR_COMPLETED_LIMIT;
+    const visibleRows = [...runningRows, ...completedRows.slice(0, limit)];
+    const omitted = completedRows.length - Math.min(completedRows.length, limit);
+
+    let statusIcon: string;
+    if (session.status === 'thinking') {
+      statusIcon = '<span class="status-icon thinking" title="thinking" aria-label="thinking">&#x25CF;</span>';
+    } else if (session.status === 'waiting') {
+      statusIcon = '<span class="status-icon waiting" title="waiting" aria-label="waiting">&#x25CF;</span>';
+    } else {
+      statusIcon = `<span class="status-icon idle" title="${session.status}" aria-label="${session.status}">&#x25CF;</span>`;
+    }
+
+    const summary = rows.length > 0
+      ? `<span class="child-summary" title="children: running / total">${runningRows.length > 0 ? `${runningRows.length} running &middot; ` : ''}${rows.length} total</span>`
+      : '';
+    const pct = `<span class="context-pct" title="context usage">${Math.round(session.usagePercent)}%</span>`;
+    const model = `<span class="model-badge">${escapeHtml(shortenModel(session.model))}</span>`;
+
+    const children = visibleRows.length > 0
+      ? `<div class="children">${visibleRows.map(r => this.renderChildRow(r, fullscreen)).join('')}${omitted > 0 ? `<div class="more-row">+${omitted} more</div>` : ''}</div>`
+      : '';
+
+    return `<div class="session-block">
+<div class="parent-row" data-cmd="focusClaudeSession" data-session-id="${escapeHtml(session.sessionId)}" title="${escapeHtml(session.sessionName)}">
+${statusIcon}<span class="session-name">${escapeHtml(session.sessionName)}</span>${model}${summary}${pct}
+</div>
+${children}
+</div>`;
+  }
+
   private buildHtml(sessions: SessionInfo[], nonceValue: string, fullscreen: boolean): string {
-    if (sessions.length === 0) {
-      return `<!DOCTYPE html>
-<html lang="en">
-<head>
+    const style = `<style>${GRAPH_CSS}</style>`;
+    const head = `<head>
 <meta charset="UTF-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonceValue}';">
-<style>
-body { font-family: var(--vscode-font-family); color: var(--vscode-foreground); }
-.empty { text-align: center; padding: 40px; opacity: 0.5; }
-</style>
-</head>
-<body><div class="empty">No active agents</div></body>
+${style}
+</head>`;
+
+    if (sessions.length === 0) {
+      const note = fullscreen
+        ? '<div class="empty-note">Sessions appear here while thinking, running subagents or Codex, or during an active turn.</div>'
+        : '';
+      return `<!DOCTYPE html>
+<html lang="en">
+${head}
+<body><div class="empty">No active agents${note}</div></body>
 </html>`;
     }
 
-    const scale = 1;
-    const layout = this.buildLayout(sessions, scale, fullscreen);
-    const nodeMap = new Map(layout.nodes.map(node => [node.id, node]));
-    const edges = layout.edges.map(edge => this.renderEdge(edge, nodeMap, scale)).join('');
-    const nodes = layout.nodes.map(node => this.renderNode(node, scale)).join('');
-
+    const now = Date.now();
+    const blocks = sessions.map(s => this.buildSessionBlock(s, fullscreen, now)).join('');
     return `<!DOCTYPE html>
 <html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonceValue}';">
-<style>
-* { box-sizing: border-box; }
-body {
-  margin: 0;
-  padding: 0;
-  font-family: var(--vscode-font-family);
-  font-size: var(--vscode-font-size);
-  color: var(--vscode-foreground);
-  background: transparent;
-  user-select: none;
-}
-.graph-wrap { width: 100%; overflow-x: auto; overflow-y: auto; padding: 8px 0; }
-svg { display: block; ${fullscreen ? 'min-width: 100%; height: auto;' : 'width: 100%; height: auto;'} }
-.edge {
-  fill: none;
-  stroke: var(--vscode-descriptionForeground);
-  stroke-opacity: 0.3;
-  stroke-width: 1.5;
-}
-.node { cursor: pointer; }
-.node:hover .shape { stroke: var(--vscode-focusBorder); stroke-width: 1.5; }
-.shape { stroke: transparent; stroke-width: 1; }
-.node text { pointer-events: none; fill: var(--vscode-editor-background); }
-.node text.center { text-anchor: middle; }
-.node text.left { text-anchor: start; }
-.node .primary { font-size: 11px; font-weight: 600; }
-.node .secondary { font-size: 9px; opacity: 0.85; }
-.claude-thinking { fill: var(--vscode-charts-blue); }
-.claude-waiting { fill: var(--vscode-charts-yellow); }
-.claude-idle { fill: var(--vscode-descriptionForeground); opacity: 0.3; }
-.subagent-active { fill: var(--vscode-charts-blue); }
-.subagent-completed { fill: var(--vscode-descriptionForeground); opacity: 0.5; }
-.codex-running { fill: var(--vscode-charts-green); }
-.codex-completed { fill: var(--vscode-descriptionForeground); opacity: 0.5; }
-@keyframes pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.5; }
-}
-.node-active { animation: pulse 2s ease-in-out infinite; }
-</style>
-</head>
+${head}
 <body>
-<div class="graph-wrap">
-<svg width="100%" viewBox="0 0 ${layout.width} ${layout.height}" role="img" aria-label="Agent graph">
-${edges}
-${nodes}
-</svg>
+<div class="graph${fullscreen ? ' fullscreen' : ''}">
+${blocks}
 </div>
 <script nonce="${nonceValue}">
 (function() {
   var vscode = acquireVsCodeApi();
   document.addEventListener('click', function(e) {
     var el = e.target;
-    while (el && (!el.classList || !el.classList.contains('node'))) { el = el.parentElement; }
-    if (!el) { return; }
-    if (el.dataset.cmd === 'focusClaudeSession') {
-      vscode.postMessage({ command: 'focusClaudeSession', sessionId: el.dataset.sessionId });
-    } else if (el.dataset.cmd === 'openCodexFile') {
-      vscode.postMessage({ command: 'openCodexFile', path: el.dataset.path });
+    while (el && el !== document.body) {
+      if (el.dataset && el.dataset.cmd === 'openCodexFile') {
+        vscode.postMessage({ command: 'openCodexFile', path: el.dataset.path });
+        return;
+      }
+      if (el.dataset && el.dataset.cmd === 'focusClaudeSession') {
+        vscode.postMessage({ command: 'focusClaudeSession', sessionId: el.dataset.sessionId });
+        return;
+      }
+      el = el.parentElement;
     }
   });
 })();
 </script>
 </body>
 </html>`;
-  }
-
-  private buildLayout(sessions: SessionInfo[], scale: number, fullscreen: boolean = false): LayoutResult {
-    const nodes: GraphNode[] = [];
-    const edges: GraphEdge[] = [];
-    const cw = CLAUDE_WIDTH * scale;
-    const ch = CLAUDE_HEIGHT * scale;
-    const childW = CHILD_WIDTH * scale;
-    const childG = CHILD_GAP * scale;
-    const groupG = GROUP_GAP * scale;
-    const pad = PADDING * scale;
-    const parentY = PARENT_Y * scale;
-    const childY = CHILD_Y * scale;
-    let cursorX = pad;
-
-    for (const session of sessions) {
-      const graph = this.graphDataMap.get(session.sessionId) || {
-        claudeSessionId: session.sessionId,
-        codexSessions: [],
-        subagentCount: session.totalAgentCount,
-        activeSubagentCount: session.activeAgentCount,
-        subagentTimestamps: session._agentTimestamps,
-        subagentMeta: [],
-      };
-
-      const now = Date.now();
-      const activeAgentIndices: number[] = [];
-      const recentAgentIndices: number[] = [];
-      for (let i = 0; i < graph.subagentCount; i++) {
-        const ts = graph.subagentTimestamps[i] || 0;
-        const age = now - ts;
-        if (age < ACTIVE_AGENT_MS) { activeAgentIndices.push(i); }
-        else if (age < RECENT_AGENT_MS) { recentAgentIndices.push(i); }
-      }
-      const RECENT_CODEX_MS = 5 * 60 * 1000;
-      const visibleCodex = graph.codexSessions.filter(c =>
-        c.status === 'running' || (now - c.mtimeMs < RECENT_CODEX_MS)
-      );
-      const doneAgents = graph.subagentCount - activeAgentIndices.length - recentAgentIndices.length;
-      const doneCodex = graph.codexSessions.length - visibleCodex.length;
-
-      const visibleAgentCount = activeAgentIndices.length + recentAgentIndices.length;
-      const activeChildCount = visibleAgentCount + visibleCodex.length;
-      const childWidth = activeChildCount > 0 ? activeChildCount * childW + (activeChildCount - 1) * childG : 0;
-
-      const sublabelParts: string[] = [session.model];
-      if (doneAgents > 0) { sublabelParts.push(`${doneAgents} done`); }
-      if (doneCodex > 0) { sublabelParts.push(`${doneCodex} codex done`); }
-
-      const label = fullscreen ? session.sessionName : this.trimLabel(session.sessionName, 22);
-      const sublabel = sublabelParts.join(' · ');
-      const nodeW = fullscreen
-        ? Math.max(cw, Math.max(label.length, sublabel.length) * 7 * scale + 16 * scale)
-        : cw;
-      const groupWidth = Math.max(nodeW, childWidth);
-      const parentX = cursorX + groupWidth / 2;
-      const parentId = `claude:${session.sessionId}`;
-
-      nodes.push({
-        id: parentId,
-        type: 'claude',
-        label,
-        sublabel,
-        w: nodeW,
-        status: session.status === 'thinking' ? 'active' : 'idle',
-        x: parentX,
-        y: parentY,
-        sessionId: session.sessionId,
-        visualStatus: session.status,
-      });
-
-      if (activeChildCount > 0) {
-        let childX = parentX - childWidth / 2 + childW / 2;
-        const visibleAgents: [number, 'active' | 'completed'][] = [
-          ...activeAgentIndices.map(i => [i, 'active'] as [number, 'active']),
-          ...recentAgentIndices.map(i => [i, 'completed'] as [number, 'completed']),
-        ];
-        for (const [i, status] of visibleAgents) {
-          const childId = `subagent:${session.sessionId}:${i}`;
-          const meta = graph.subagentMeta[i];
-          nodes.push({
-            id: childId, type: 'subagent',
-            label: meta?.label || `Agent ${i + 1}`,
-            sublabel: meta?.model || session.model,
-            tooltip: meta?.description || meta?.label || `Agent ${i + 1}`,
-            status, x: childX, y: childY,
-          });
-          edges.push({ from: parentId, to: childId });
-          childX += childW + childG;
-        }
-        for (const codex of visibleCodex) {
-          const childId = `codex:${codex.sessionId}`;
-          const isRunning = codex.status === 'running';
-          nodes.push({
-            id: childId, type: 'codex',
-            label: codex.subcommand,
-            sublabel: codex.model || codex.subcommand,
-            tooltip: codex.prompt || codex.subcommand,
-            status: isRunning ? 'active' : 'completed', x: childX, y: childY,
-            filePath: codex.filePath, visualStatus: isRunning ? 'running' : undefined,
-          });
-          edges.push({ from: parentId, to: childId });
-          childX += childW + childG;
-        }
-      }
-
-      cursorX += groupWidth + groupG;
-    }
-
-    const width = Math.max(240, cursorX - groupG + pad);
-    const hasChildren = nodes.some(n => n.type !== 'claude');
-    const height = hasChildren ? childY + pad : parentY + ch / 2 + pad;
-    return { nodes, edges, width, height };
-  }
-
-  private renderEdge(edge: GraphEdge, nodeMap: Map<string, GraphNode>, scale: number): string {
-    const from = nodeMap.get(edge.from);
-    const to = nodeMap.get(edge.to);
-    if (!from || !to) { return ''; }
-    const ch = CLAUDE_HEIGHT * scale;
-    const childH = CHILD_HEIGHT * scale;
-    const x1 = from.x;
-    const y1 = from.y + ch / 2;
-    const x2 = to.x;
-    const y2 = to.y - childH / 2;
-    const midY = (y1 + y2) / 2;
-    return `<path class="edge" d="M ${x1.toFixed(1)},${y1.toFixed(1)} C ${x1.toFixed(1)},${midY.toFixed(1)} ${x2.toFixed(1)},${midY.toFixed(1)} ${x2.toFixed(1)},${y2.toFixed(1)}" />`;
-  }
-
-  private renderNode(node: GraphNode, scale: number): string {
-    if (node.type === 'claude') { return this.renderClaudeNode(node, scale); }
-    if (node.type === 'subagent') { return this.renderSubagentNode(node, scale); }
-    return this.renderCodexNode(node, scale);
-  }
-
-  private renderClaudeNode(node: GraphNode, scale: number): string {
-    const nw = node.w || CLAUDE_WIDTH * scale;
-    const ch = CLAUDE_HEIGHT * scale;
-    const x = node.x - nw / 2;
-    const y = node.y - ch / 2;
-    const pad = 8 * scale;
-    const textX = x + pad;
-    const clipId = `clip-${node.id.replace(/[^a-zA-Z0-9]/g, '_')}`;
-    const className = node.visualStatus === 'thinking'
-      ? 'claude-thinking node-active'
-      : node.visualStatus === 'waiting'
-        ? 'claude-waiting'
-        : 'claude-idle';
-    return `<g class="node" data-cmd="focusClaudeSession" data-session-id="${escapeHtml(node.sessionId || '')}">
-<defs><clipPath id="${clipId}"><rect x="${(x + pad).toFixed(1)}" y="${y.toFixed(1)}" width="${nw - pad * 2}" height="${ch}" /></clipPath></defs>
-<rect class="shape ${className}" x="${x.toFixed(1)}" y="${y.toFixed(1)}" rx="${8 * scale}" width="${nw}" height="${ch}" />
-<text class="primary left" clip-path="url(#${clipId})" x="${textX.toFixed(1)}" y="${(node.y - 3 * scale).toFixed(1)}" style="font-size:${11 * scale}px">${escapeHtml(node.label)}</text>
-<text class="secondary left" clip-path="url(#${clipId})" x="${textX.toFixed(1)}" y="${(node.y + 14 * scale).toFixed(1)}" style="font-size:${9 * scale}px">${escapeHtml(node.sublabel)}</text>
-</g>`;
-  }
-
-  private renderChildNode(node: GraphNode, scale: number, cssClass: string, cmd?: string): string {
-    const w = CHILD_WIDTH * scale;
-    const h = CHILD_HEIGHT * scale;
-    const x = node.x - w / 2;
-    const y = node.y - h / 2;
-    const pad = 6 * scale;
-    const clipId = `clip-${node.id.replace(/[^a-zA-Z0-9]/g, '_')}`;
-    const tip = node.tooltip ? `<title>${escapeHtml(node.tooltip)}</title>` : '';
-    const cmdAttr = cmd ? ` data-cmd="${cmd}" data-path="${escapeHtml(node.filePath || '')}"` : '';
-    return `<g class="node"${cmdAttr}>
-${tip}
-<defs><clipPath id="${clipId}"><rect x="${(x + pad).toFixed(1)}" y="${y.toFixed(1)}" width="${w - pad * 2}" height="${h}" /></clipPath></defs>
-<rect class="shape ${cssClass}" x="${x.toFixed(1)}" y="${y.toFixed(1)}" rx="${4 * scale}" width="${w}" height="${h}" />
-<text class="primary left" clip-path="url(#${clipId})" x="${(x + pad).toFixed(1)}" y="${(node.y - 2 * scale).toFixed(1)}" style="font-size:${9 * scale}px">${escapeHtml(node.label)}</text>
-<text class="secondary left" clip-path="url(#${clipId})" x="${(x + pad).toFixed(1)}" y="${(node.y + 11 * scale).toFixed(1)}" style="font-size:${8 * scale}px">${escapeHtml(node.sublabel)}</text>
-</g>`;
-  }
-
-  private renderSubagentNode(node: GraphNode, scale: number): string {
-    const className = node.status === 'active' ? 'subagent-active node-active' : 'subagent-completed';
-    return this.renderChildNode(node, scale, className);
-  }
-
-  private renderCodexNode(node: GraphNode, scale: number): string {
-    const className = node.status === 'active' ? 'codex-running node-active' : 'codex-completed';
-    return this.renderChildNode(node, scale, className, 'openCodexFile');
-  }
-
-  private trimLabel(label: string, max: number): string {
-    return label.length > max ? label.substring(0, max) + '...' : label;
   }
 }

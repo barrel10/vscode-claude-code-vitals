@@ -487,9 +487,11 @@ export function activate(context: vscode.ExtensionContext) {
 
 export function deactivate() {}
 
-// Debug hook: mirrors the exact data handed to the graph view so external
-// tooling can observe what the UI displays. Enabled only when the
-// (undeclared) setting claudeCodeVitals.debugGraphStateFile is set.
+// Debug hook: dumps a subset of the data handed to the graph view so external
+// tooling can observe session/Codex state. Note this is a subset, not a mirror:
+// subagent metadata (SubagentMeta.lastActivityMs), which the view uses for its
+// running/completed decision, is not included. Enabled only when the
+// claudeCodeVitals.debugGraphStateFile setting is set (machine scope).
 function writeGraphDebugState(filePath: string, sessions: SessionInfo[], graphDataMap: Map<string, GraphData>): void {
   try {
     const now = Date.now();
@@ -587,7 +589,7 @@ function readSubagentMeta(projectsDir: string, projectDir: string, sessionId: st
           continue;
         }
 
-        let meta: SubagentMeta = { label: `Agent ${idx}`, description: '', model: null };
+        let meta: SubagentMeta = { label: `Agent ${idx}`, description: '', model: null, lastActivityMs: stat.mtimeMs };
 
         if (metaMtimeMs > 0) {
           try {
@@ -601,6 +603,7 @@ function readSubagentMeta(projectsDir: string, projectDir: string, sessionId: st
               label: name || agentType || `Agent ${idx}`,
               description: desc || promptDesc || name || agentType || `Agent ${idx}`,
               model,
+              lastActivityMs: stat.mtimeMs,
             };
           } catch { /* partial write — fall through to JSONL extraction */ }
         }
@@ -615,7 +618,7 @@ function readSubagentMeta(projectsDir: string, projectDir: string, sessionId: st
         }
         subagentMetaCache.set(fp, { mtimeMs: stat.mtimeMs, size: stat.size, metaMtimeMs, meta });
         results.push(meta);
-      } catch { results.push({ label: `Agent ${idx}`, description: '', model: null }); }
+      } catch { results.push({ label: `Agent ${idx}`, description: '', model: null, lastActivityMs: 0 }); }
     }
   } catch { /* subagent dir doesn't exist */ }
   return results;

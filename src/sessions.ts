@@ -334,16 +334,18 @@ export function readClaudeSettings(): ClaudeSettings {
   };
 }
 
-// Model info: base context size (without [1m]) and whether the model supports
-// extended (1M) context via the [1m] suffix (which triggers the API beta header
-// context-1m-2025-08-07). The base size is the conservative default used when no
-// session-level 1M signal is present; per-session promotion to 1M happens in
-// parseSessionJsonl via explicit [1m] / evidenced usage / matching settings model.
+// Model info: base context size (without [1m]) and whether the model can run at 1M
+// context at all — usually via the [1m] suffix (which triggers the API beta header
+// context-1m-2025-08-07), but for opus-5 as its own documented default. The base size
+// is the conservative default used when no session-level 1M signal is present;
+// per-session promotion to 1M happens in parseSessionJsonl via explicit [1m] /
+// evidenced usage / matching settings model.
 // opus-4-8/4-7 may auto-upgrade to 1M on the first-party API without [1m], but that
 // is not encoded as a default here: assuming 1M for a 200K-capped environment would
 // hide real compact pressure, whereas a conservative 200K default only over-warns.
 // Aliases (fable/opus/sonnet/haiku) map to the current default version.
-// (2026-04-17 verified against docs.anthropic.com; claude-fable-5 added 2026-06-10)
+// (2026-04-17 verified against docs.anthropic.com; claude-fable-5 added 2026-06-10;
+//  claude-opus-5 added 2026-07-25 with 1M as its documented default and maximum)
 interface ModelInfo {
   contextSize: number;
   supportsExtended: boolean;
@@ -351,6 +353,7 @@ interface ModelInfo {
 
 const MODEL_INFO: Record<string, ModelInfo> = {
   'claude-fable-5':    { contextSize: 200_000, supportsExtended: true },
+  'claude-opus-5':     { contextSize: 1_000_000, supportsExtended: true },
   'claude-opus-4-8':   { contextSize: 200_000, supportsExtended: true },
   'claude-opus-4-7':   { contextSize: 200_000, supportsExtended: true },
   'claude-opus-4-6':   { contextSize: 200_000, supportsExtended: true },
@@ -370,8 +373,9 @@ const MODEL_INFO: Record<string, ModelInfo> = {
 
 // API pricing per million tokens (2026-04-17 verified against docs.anthropic.com)
 // Aliases (fable/opus/sonnet/haiku) apply to the current default version and any newer
-// model that shares the alias's pricing. Per-ID entries override the alias for
-// legacy versions whose pricing differs (e.g. Opus 4.1 is 3x the Opus 4.6 rate).
+// model that shares the alias's pricing. Per-ID entries override the alias in two cases:
+// (a) legacy versions whose pricing differs (e.g. Opus 4.1 is 3x the Opus 4.6 rate), and
+// (b) current models pinned so their rate survives the alias moving to a newer generation.
 interface ModelPricing {
   inputPerMToken: number;
   cacheWrite5mPerMToken: number;
@@ -384,6 +388,10 @@ const MODEL_PRICING: Record<string, ModelPricing> = {
   // Fable 5: $10/$50 per MTok (2026-06-10 verified against platform.claude.com docs).
   // Cache rates follow the standard multipliers (5m write 1.25x, 1h write 2x, read 0.1x).
   'fable': { inputPerMToken: 10, cacheWrite5mPerMToken: 12.5, cacheWrite1hPerMToken: 20, cacheReadPerMToken: 1, outputPerMToken: 50 },
+  // Opus 5: $5/$25 per MTok (2026-07-25 verified against platform.claude.com docs).
+  // Case (b): identical to the 'opus' alias today, pinned so claude-opus-5 sessions keep
+  // Opus 5 rates once that alias moves on. claude-fable-5 has no such pin yet.
+  'claude-opus-5': { inputPerMToken: 5, cacheWrite5mPerMToken: 6.25, cacheWrite1hPerMToken: 10, cacheReadPerMToken: 0.5, outputPerMToken: 25 },
   'opus': { inputPerMToken: 5, cacheWrite5mPerMToken: 6.25, cacheWrite1hPerMToken: 10, cacheReadPerMToken: 0.5, outputPerMToken: 25 },
   'sonnet': { inputPerMToken: 3, cacheWrite5mPerMToken: 3.75, cacheWrite1hPerMToken: 6, cacheReadPerMToken: 0.3, outputPerMToken: 15 },
   'haiku': { inputPerMToken: 1, cacheWrite5mPerMToken: 1.25, cacheWrite1hPerMToken: 2, cacheReadPerMToken: 0.1, outputPerMToken: 5 },
@@ -409,6 +417,9 @@ function clampNumber(value: number, min: number, max: number): number {
 
 function getDefaultMaxOutputTokens(model: string): number {
   const normalized = normalizeModelId(model);
+  if (normalized === 'claude-opus-5') {
+    return 128_000;
+  }
   if (
     normalized === 'claude-fable-5' ||
     normalized === 'claude-opus-4-8' ||
@@ -826,6 +837,11 @@ function cloneParseState(state: SessionParseState): SessionParseState {
   };
 }
 
+// Verified against Claude Code v2.1.219 JSONL on 2026-07-25. Known top-level
+// types: assistant, user, attachment, queue-operation, ai-title, last-prompt,
+// file-history-snapshot, custom-title, system, mode, file-history-delta, and
+// frame-link. Only the records handled below affect session state; others are
+// intentionally ignored. Progress/agent_progress is handled for subagents.
 function processSessionLine(line: string, state: SessionParseState): void {
   if (!line.trim()) { state.lineIdx++; return; }
   try {

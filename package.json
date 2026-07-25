@@ -2,7 +2,7 @@
   "name": "claude-code-vitals",
   "displayName": "Claude Code Vitals",
   "description": "Real-time session status detection, multi-session management, and compact tracking for Claude Code",
-  "version": "1.7.2",
+  "version": "1.8.0",
   "publisher": "barrel1054",
   "license": "MIT",
   "repository": {
@@ -254,6 +254,7 @@
         "claudeCodeVitals.enableHookDetection": {
           "type": "boolean",
           "default": false,
+          "scope": "machine",
           "order": 1,
           "markdownDescription": "%configuration.enableHookDetection.description%"
         },
@@ -326,6 +327,13 @@
           "default": false,
           "order": 14,
           "description": "%configuration.useEnvOauthToken.description%"
+        },
+        "claudeCodeVitals.debugGraphStateFile": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "order": 15,
+          "description": "%configuration.debugGraphStateFile.description%"
         },
         "claudeCodeVitals.defaultGroup": {
           "type": "string",

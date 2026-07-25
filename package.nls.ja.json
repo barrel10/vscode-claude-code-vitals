@@ -16,6 +16,7 @@
   "configuration.defaultFilter.description": "セッション一覧のデフォルトフィルタ",
   "configuration.defaultModelFilter.description": "セッション一覧のデフォルトモデルフィルタ",
   "configuration.useEnvOauthToken.description": "usage取得時にディスク上の認証情報より環境変数 CLAUDE_CODE_OAUTH_TOKEN を優先する",
+  "configuration.debugGraphStateFile.description": "デバッグ用にAgent Graphへ渡す状態を指定したJSONファイルへ書き出す",
   "configuration.cardDisplay.description": "セッションカードに表示する要素",
   "configuration.cardDisplay.sparkline": "コンテキスト使用量のスパークラインチャート",
   "configuration.cardDisplay.model": "モデル名",
