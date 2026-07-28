@@ -2,7 +2,7 @@
   "name": "claude-code-vitals",
   "displayName": "Claude Code Vitals",
   "description": "Real-time session status detection, multi-session management, and compact tracking for Claude Code",
-  "version": "1.8.0",
+  "version": "1.8.1",
   "publisher": "barrel1054",
   "license": "MIT",
   "repository": {

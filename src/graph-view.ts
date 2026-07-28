@@ -1,11 +1,13 @@
 import * as vscode from 'vscode';
 import { CodexSessionInfo } from './codex';
-import { SessionInfo, formatRelativeTime, shortenModel } from './sessions';
+import { SessionInfo, formatRelativeTime, getSubagentState, shortenModel, SubagentState } from './sessions';
 
 export interface SubagentMeta {
   label: string;
   description: string;
   model: string | null;
+  agentId: string;
+  toolUseId: string | null;
   /** Last activity of this subagent (JSONL file mtime). 0 = unknown. */
   lastActivityMs: number;
 }
@@ -31,14 +33,13 @@ interface ChildRow {
   kind: 'subagent' | 'codex';
   primary: string;
   secondary: string;
-  running: boolean;
+  state: SubagentState;
   lastActivityMs: number;
   detail: string;
   durationText?: string;
   filePath?: string;
 }
 
-const ACTIVE_AGENT_MS = 15_000;
 const SIDEBAR_COMPLETED_LIMIT = 8;
 const PANEL_COMPLETED_LIMIT = 30;
 
@@ -116,6 +117,10 @@ body {
   color: var(--vscode-charts-blue);
   opacity: 1;
   animation: pulse 2s ease-in-out infinite;
+}
+.child-row.subagent.stale .status-dot {
+  color: var(--vscode-charts-yellow);
+  opacity: .8;
 }
 .child-row.codex.running .status-dot {
   color: var(--vscode-charts-green);
@@ -328,6 +333,8 @@ export class GraphWebviewProvider implements vscode.WebviewViewProvider {
 
   private buildChildRows(session: SessionInfo, graph: GraphData, now: number): ChildRow[] {
     const rows: ChildRow[] = [];
+    const completedAgentIds = new Set(session._completedAgentIds);
+    const finishedAgentToolUseIds = new Set(session._finishedAgentToolUseIds);
     for (let i = 0; i < graph.subagentCount; i++) {
       const meta = graph.subagentMeta[i];
       const label = meta?.label || `Agent ${i + 1}`;
@@ -341,7 +348,7 @@ export class GraphWebviewProvider implements vscode.WebviewViewProvider {
         kind: 'subagent',
         primary: label,
         secondary: shortenModel(meta?.model || session.model),
-        running: last > 0 && now - last < ACTIVE_AGENT_MS,
+        state: getSubagentState(meta?.agentId || '', meta?.toolUseId || null, last, completedAgentIds, finishedAgentToolUseIds, now),
         lastActivityMs: last,
         detail: meta?.description || label,
       });
@@ -353,7 +360,7 @@ export class GraphWebviewProvider implements vscode.WebviewViewProvider {
         // Codex model IDs (gpt-5-codex, gpt-5.1-codex-max, ...) are not Claude IDs, so
         // shortenModel would collapse every one of them to "gpt". Show the raw value.
         secondary: codex.model || '',
-        running: codex.status === 'running',
+        state: codex.status === 'running' ? 'running' : 'completed',
         lastActivityMs: codex.mtimeMs,
         detail: codex.prompt || codex.subcommand,
         durationText: formatDuration(codex.mtimeMs - codex.startTime),
@@ -361,15 +368,16 @@ export class GraphWebviewProvider implements vscode.WebviewViewProvider {
       });
     }
     rows.sort((a, b) => {
-      if (a.running !== b.running) { return a.running ? -1 : 1; }
+      const rank = (row: ChildRow): number => row.state === 'running' ? 0 : row.state === 'stale' ? 1 : 2;
+      if (rank(a) !== rank(b)) { return rank(a) - rank(b); }
       return b.lastActivityMs - a.lastActivityMs;
     });
     return rows;
   }
 
   private renderChildRow(row: ChildRow, fullscreen: boolean): string {
-    const stateText = row.running ? 'running' : 'completed';
-    const cls = `child-row ${row.kind}${row.running ? ' running' : ''}`;
+    const stateText = row.state;
+    const cls = `child-row ${row.kind} ${stateText}`;
     const cmdAttr = row.kind === 'codex'
       ? ` data-cmd="openCodexFile" data-path="${escapeHtml(row.filePath || '')}"`
       : '';
@@ -405,11 +413,11 @@ ${time}
       subagentMeta: [],
     };
     const rows = this.buildChildRows(session, graph, now);
-    const runningRows = rows.filter(r => r.running);
-    const completedRows = rows.filter(r => !r.running);
+    const runningRows = rows.filter(r => r.state === 'running');
+    const nonRunningRows = rows.filter(r => r.state !== 'running');
     const limit = fullscreen ? PANEL_COMPLETED_LIMIT : SIDEBAR_COMPLETED_LIMIT;
-    const visibleRows = [...runningRows, ...completedRows.slice(0, limit)];
-    const omitted = completedRows.length - Math.min(completedRows.length, limit);
+    const visibleRows = [...runningRows, ...nonRunningRows.slice(0, limit)];
+    const omitted = nonRunningRows.length - Math.min(nonRunningRows.length, limit);
 
     let statusIcon: string;
     if (session.status === 'thinking') {

@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.8.1 (2026-07-29)
+
+### Fixed
+- Context usage percentages were up to 5x too high on models with a 1M window. The window was resolved from a `[1m]` suffix in the model name plus a built-in table, and Claude Opus 5 carries no such suffix, so a session holding 54K tokens of its 1M window read as 27% instead of 5.6%. The window now comes from the Models API (`max_input_tokens`), cached on disk and refreshed once at startup and then daily, with the built-in table kept as an offline fallback. Checking that table against the API also corrected Claude Sonnet 4.5, listed as 200K but actually 1M
+- Subagents that pause between writes no longer show as completed while they are still running. State was inferred from the subagent log's modification time with a 15-second threshold, so an agent that was thinking or waiting on a long tool call read as finished — the slower the model, the worse it got, with silences of several minutes reading as finished within 15 seconds. Running state now comes from the parent session's completion signals; the timestamp is used only for the "last activity" label and a 10-minute stale marker
+- A response stream that failed after its headers had arrived could leave the rate-limit and model-window requests permanently unfinished, so neither value updated again until the extension was reloaded
+
+### Changed
+- Fewer file-system calls on every refresh: computing a session's latest activity no longer stats each subagent's `.meta.json` sidecar alongside its log. The sidecar is written once when the agent spawns and the log keeps growing afterwards, so it could never be the newer of the two (sidecar timestamps are still used where labels are cached)
+
 ## 1.8.0 (2026-07-25)
 
 ### Added

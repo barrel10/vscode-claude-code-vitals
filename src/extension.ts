@@ -12,6 +12,7 @@ import { SessionWebviewProvider, OverviewTreeProvider } from './views';
 import { GraphWebviewProvider, GraphData, SubagentMeta } from './graph-view';
 import { findRecentCodexSessions, getCodexSessionsDir, setCodexLogger, CodexSessionInfo } from './codex';
 import { fetchRateLimits, startCredentialsWatch, stopCredentialsWatch } from './ratelimit';
+import { initializeModelsApi, refreshModelsApi, clearModelsApiBackoff, setModelsApiLogger } from './models-api';
 
 // ─── Constants ───
 
@@ -59,6 +60,11 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(outputChannel);
   log = (msg: string) => outputChannel.appendLine(`[${new Date().toISOString()}] ${msg}`);
   setCodexLogger(log);
+  setModelsApiLogger(log);
+  // The cache path is only logged on failure (see models-api). Logging it on every
+  // start would put an absolute path — which contains the OS user name on Windows —
+  // into an Output Channel that users routinely paste into bug reports.
+  initializeModelsApi(context.globalStorageUri.fsPath);
   const projectsDir = path.join(os.homedir(), '.claude', 'projects');
 
   const graphProvider = new GraphWebviewProvider(async (sessionId) => {
@@ -285,6 +291,11 @@ export function activate(context: vscode.ExtensionContext) {
         }).catch((e) => { log(`Failed to fetch rate limits: ${e}`); });
       }
 
+      // Models API cache refresh is independent of session rendering. Its own 24-hour
+      // interval and backoff prevent repeated requests during the normal poll cycle.
+      const useEnvOauthToken = config.get<boolean>('useEnvOauthToken', false);
+      refreshModelsApiAndReconcile(useEnvOauthToken);
+
     // Notifications (opt-in, only on data change)
       if (dataChanged && effectiveLevel !== 'none') {
         const threshold = effectiveLevel === 'warning' ? warnThreshold : critThreshold;
@@ -316,6 +327,19 @@ export function activate(context: vscode.ExtensionContext) {
         scheduleRefresh();
       }
     }
+  }
+
+  // Models API cache refresh is independent of session rendering. Its own 24-hour
+  // interval and backoff prevent repeated requests during the normal poll cycle; this
+  // wrapper is shared by the poll-driven refresh and the credentials-watch callback so
+  // both apply the same "reconcile on change" behavior from one place.
+  function refreshModelsApiAndReconcile(useEnvOauthToken: boolean): void {
+    void refreshModelsApi(useEnvOauthToken).then(changed => {
+      if (changed) {
+        clearSessionCache();
+        scheduleRefresh(undefined, true);
+      }
+    });
   }
 
   // Apply default sort/filter from settings
@@ -468,7 +492,14 @@ export function activate(context: vscode.ExtensionContext) {
   }
 
   // Start
-  startCredentialsWatch(() => scheduleRefresh(projectsDir, true));
+  startCredentialsWatch(() => {
+    scheduleRefresh(projectsDir, true);
+    // Credential rotation doesn't mean the Models API data is stale — just that a stored
+    // failure shouldn't keep blocking the normal interval-gated refresh below.
+    clearModelsApiBackoff();
+    const useEnvOauthToken = vscode.workspace.getConfiguration('claudeCodeVitals').get<boolean>('useEnvOauthToken', false);
+    refreshModelsApiAndReconcile(useEnvOauthToken);
+  });
   void refresh();
   pollTimer = setInterval(() => scheduleRefresh(projectsDir, true), getPollIntervalMs());
 
@@ -489,8 +520,8 @@ export function deactivate() {}
 
 // Debug hook: dumps a subset of the data handed to the graph view so external
 // tooling can observe session/Codex state. Note this is a subset, not a mirror:
-// subagent metadata (SubagentMeta.lastActivityMs), which the view uses for its
-// running/completed decision, is not included. Enabled only when the
+// subagent metadata (including state inputs), which the view uses for its
+// running/stale/completed decision, is not included. Enabled only when the
 // claudeCodeVitals.debugGraphStateFile setting is set (machine scope).
 function writeGraphDebugState(filePath: string, sessions: SessionInfo[], graphDataMap: Map<string, GraphData>): void {
   try {
@@ -589,7 +620,9 @@ function readSubagentMeta(projectsDir: string, projectDir: string, sessionId: st
           continue;
         }
 
-        let meta: SubagentMeta = { label: `Agent ${idx}`, description: '', model: null, lastActivityMs: stat.mtimeMs };
+        const agentId = file.startsWith('agent-') ? file.substring('agent-'.length, file.length - '.jsonl'.length) : '';
+        let meta: SubagentMeta = { label: `Agent ${idx}`, description: '', model: null, agentId, toolUseId: null, lastActivityMs: stat.mtimeMs };
+        let hasMetaDescription = false;
 
         if (metaMtimeMs > 0) {
           try {
@@ -598,17 +631,25 @@ function readSubagentMeta(projectsDir: string, projectDir: string, sessionId: st
             const desc = typeof raw.description === 'string' ? raw.description : '';
             const agentType = typeof raw.agentType === 'string' ? raw.agentType : '';
             const model = typeof raw.model === 'string' ? raw.model : null;
+            const toolUseId = typeof raw.toolUseId === 'string' ? raw.toolUseId : null;
             const promptDesc = desc ? '' : extractSubagentLabel(fp, stat.size);
+            hasMetaDescription = !!desc;
             meta = {
-              label: name || agentType || `Agent ${idx}`,
+              label: name || desc || agentType || `Agent ${idx}`,
               description: desc || promptDesc || name || agentType || `Agent ${idx}`,
               model,
+              agentId,
+              toolUseId,
               lastActivityMs: stat.mtimeMs,
             };
           } catch { /* partial write — fall through to JSONL extraction */ }
         }
 
-        if (!meta.description || meta.description === meta.label) {
+        // Skip the JSONL-prompt fallback when meta.json supplied a real description:
+        // `description === label` alone doesn't mean "no info" — it also happens when
+        // meta.json's own description is reused for both label and description (name
+        // absent). Only fall back when meta.json truly had nothing to offer.
+        if (!hasMetaDescription && (!meta.description || meta.description === meta.label)) {
           const desc = extractSubagentLabel(fp, stat.size);
           if (desc) { meta.description = desc; }
         }
@@ -618,7 +659,7 @@ function readSubagentMeta(projectsDir: string, projectDir: string, sessionId: st
         }
         subagentMetaCache.set(fp, { mtimeMs: stat.mtimeMs, size: stat.size, metaMtimeMs, meta });
         results.push(meta);
-      } catch { results.push({ label: `Agent ${idx}`, description: '', model: null, lastActivityMs: 0 }); }
+      } catch { results.push({ label: `Agent ${idx}`, description: '', model: null, agentId: '', toolUseId: null, lastActivityMs: 0 }); }
     }
   } catch { /* subagent dir doesn't exist */ }
   return results;

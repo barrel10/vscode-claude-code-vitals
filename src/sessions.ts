@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+import { getMaxInputTokens, normalizeModelId } from './models-api';
 
 // ─── Types ───
 
@@ -122,12 +123,51 @@ export interface SessionInfo {
   totalAgentCount: number;
   /** @internal agent timestamps for recalculating activeAgentCount on cache hit */
   _agentTimestamps: number[];
+  /** @internal subagent IDs and activity times for state calculation */
+  _subagentActivities: SubagentActivity[];
+  /** @internal task-notification completion signals from the parent JSONL */
+  _completedAgentIds: string[];
+  /** @internal completed synchronous Agent tool-use IDs from the parent JSONL */
+  _finishedAgentToolUseIds: string[];
   /** @internal tasks dir max mtime for activity detection */
   tasksMtimeMs: number;
   /** @internal subagent dir max mtime for cache invalidation */
   subagentMtimeMs: number;
   /** @internal settings fingerprint for cache invalidation */
   settingsCacheKey: string;
+}
+
+export interface SubagentActivity {
+  agentId: string;
+  toolUseId: string | null;
+  lastActivityMs: number;
+}
+
+export type SubagentState = 'running' | 'stale' | 'completed';
+
+export const STALE_SUBAGENT_MS = 600_000;
+
+export function getSubagentState(
+  agentId: string,
+  toolUseId: string | null,
+  lastActivityMs: number,
+  completedAgentIds: ReadonlySet<string>,
+  finishedAgentToolUseIds: ReadonlySet<string>,
+  now: number,
+): SubagentState {
+  if ((agentId && completedAgentIds.has(agentId)) || (toolUseId && finishedAgentToolUseIds.has(toolUseId))) {
+    return 'completed';
+  }
+  if (lastActivityMs === 0 || now - lastActivityMs > STALE_SUBAGENT_MS) { return 'stale'; }
+  return 'running';
+}
+
+function countRunningSubagents(info: SessionInfo, now: number): number {
+  const completedAgentIds = new Set(info._completedAgentIds);
+  const finishedAgentToolUseIds = new Set(info._finishedAgentToolUseIds);
+  return info._subagentActivities.filter(activity =>
+    getSubagentState(activity.agentId, activity.toolUseId, activity.lastActivityMs, completedAgentIds, finishedAgentToolUseIds, now) === 'running'
+  ).length;
 }
 
 interface SessionParseState {
@@ -148,9 +188,13 @@ interface SessionParseState {
   prevContext: number;
   maxContextSeen: number;
   hasCompactAbove200K: boolean;
+  latestAutoCompactPreTokens: number | null;
   compactBoundaryPending: boolean;
   agentIds: Set<string>;
   agentLastSeen: Map<string, number>;
+  completedAgentIds: Set<string>;
+  agentToolUseIds: Set<string>;
+  finishedAgentToolUseIds: Set<string>;
   assistantCount: number;
   sessionId: string;
   firstUserText: string;
@@ -282,12 +326,16 @@ export function readClaudeSettings(): ClaudeSettings {
   disableCompact = envTruthy(envValue('DISABLE_COMPACT', settingsEnv));
   disableAutoCompact = envTruthy(envValue('DISABLE_AUTO_COMPACT', settingsEnv));
 
-  // Detect context window override from model settings and GrowthBook feature flag.
-  // Priority: settings.local.json model [1m] > settings.json model [1m] > GrowthBook flag
+  // Detect a 1M context window opt-in from the configured model name.
+  // Priority: settings.local.json model [1m] > settings.json model [1m]
   // settingsModelNormalized tracks which model the [1m] was configured for, so that
   // contextWindowOverride is only applied to sessions running that same model family.
-  // GrowthBook overrides (no specific model) leave settingsModelNormalized null and
-  // apply to all extended-context models.
+  // A GrowthBook fallback (cachedGrowthBookFeatures.tengu_hawthorn_window) used to sit
+  // after these two. It was removed on 2026-07-29: the flag read 200000 on an account
+  // whose sessions demonstrably held 724K tokens, with the feature cache only 2h old —
+  // so the value does not represent the session context window despite its name, and
+  // feeding it into contextMax was the direct cause of 1M models reading as 200K.
+  // Models API + [1m] + evidenced usage cover the promotion cases it was meant to serve.
   let settingsModelNormalized: string | null = null;
   if (contextWindowOverride === null) {
     const re1m = /[\[(]1[mM][\])]/;
@@ -309,18 +357,6 @@ export function readClaudeSettings(): ClaudeSettings {
         }
       } catch { /* ignore */ }
     }
-    if (contextWindowOverride === null) {
-      try {
-        const claudeJson = JSON.parse(
-          fs.readFileSync(path.join(os.homedir(), '.claude.json'), 'utf8')
-        );
-        const features = claudeJson?.cachedGrowthBookFeatures;
-        const hw = features?.tengu_hawthorn_window;
-        if (typeof hw === 'number' && hw > 0) {
-          contextWindowOverride = hw;
-        }
-      } catch { /* ignore */ }
-    }
   }
 
 
@@ -334,40 +370,55 @@ export function readClaudeSettings(): ClaudeSettings {
   };
 }
 
-// Model info: base context size (without [1m]) and whether the model can run at 1M
-// context at all — usually via the [1m] suffix (which triggers the API beta header
-// context-1m-2025-08-07), but for opus-5 as its own documented default. The base size
-// is the conservative default used when no session-level 1M signal is present;
-// per-session promotion to 1M happens in parseSessionJsonl via explicit [1m] /
-// evidenced usage / matching settings model.
-// opus-4-8/4-7 may auto-upgrade to 1M on the first-party API without [1m], but that
-// is not encoded as a default here: assuming 1M for a 200K-capped environment would
-// hide real compact pressure, whereas a conservative 200K default only over-warns.
+// Model info: base context size and whether the model can run at 1M context at all.
+// The base size is each model's own documented context window, applied from the first
+// message of a session — it is not a floor that waits for evidence. per-session signals
+// in parseSessionJsonl (explicit [1m] / evidenced usage / matching settings model) only
+// ever promote above this base; they never lower it.
+// Models documenting a 1M window carry 1M here. Earlier revisions kept the current 1M
+// generation at a conservative 200K base on the theory that a 200K-capped environment
+// would otherwise have real compact pressure hidden. That was dropped: it under-reported
+// every session below 200K by 5x (a 54K-token session read as 27% instead of 5.6%), and
+// the guard only ever corrected itself after a session had already crossed 200K — the
+// point where the warning is least useful. A genuinely 200K-capped environment is still
+// handled, by settings.maxTokens / the [1m]-carrying settings model / the GrowthBook
+// window flag, all of which are read before this table.
+// supportsExtended marks models that can reach 1M at all; it gates the settings-derived
+// override in parseSessionJsonl and stays true for the 1M generation.
 // Aliases (fable/opus/sonnet/haiku) map to the current default version.
 // (2026-04-17 verified against docs.anthropic.com; claude-fable-5 added 2026-06-10;
-//  claude-opus-5 added 2026-07-25 with 1M as its documented default and maximum)
+//  claude-opus-5 added 2026-07-25; 2026-07-29 every entry re-verified against the live
+//  Models API (GET /v1/models -> max_input_tokens), which is authoritative and caught a
+//  wrong hand-maintained value (sonnet-4-5 is 1M, not 200K). fable-5 / opus-5 / opus-4-8 /
+//  opus-4-7 / opus-4-6 / sonnet-5 / sonnet-4-6 / sonnet-4-5 are 1M; opus-4-5 / opus-4-1 /
+//  haiku-4-5 are 200K. Treat this table as a stale-by-design offline fallback and re-verify
+//  against /v1/models rather than against prose docs when touching it.
+//  claude-mythos-5 is deliberately absent: it is Project Glasswing-only, and
+//  shortenModel/MODEL_PRICING have no entry for it, so listing it here alone would
+//  give it a context window but no price and a "claude" model badge.)
 interface ModelInfo {
   contextSize: number;
   supportsExtended: boolean;
 }
 
 const MODEL_INFO: Record<string, ModelInfo> = {
-  'claude-fable-5':    { contextSize: 200_000, supportsExtended: true },
+  'claude-fable-5':    { contextSize: 1_000_000, supportsExtended: true },
   'claude-opus-5':     { contextSize: 1_000_000, supportsExtended: true },
-  'claude-opus-4-8':   { contextSize: 200_000, supportsExtended: true },
-  'claude-opus-4-7':   { contextSize: 200_000, supportsExtended: true },
-  'claude-opus-4-6':   { contextSize: 200_000, supportsExtended: true },
-  'claude-sonnet-4-6': { contextSize: 200_000, supportsExtended: true },
+  'claude-opus-4-8':   { contextSize: 1_000_000, supportsExtended: true },
+  'claude-opus-4-7':   { contextSize: 1_000_000, supportsExtended: true },
+  'claude-opus-4-6':   { contextSize: 1_000_000, supportsExtended: true },
+  'claude-sonnet-5':   { contextSize: 1_000_000, supportsExtended: true },
+  'claude-sonnet-4-6': { contextSize: 1_000_000, supportsExtended: true },
+  'claude-sonnet-4-5': { contextSize: 1_000_000, supportsExtended: true },
   'claude-opus-4-5':   { contextSize: 200_000, supportsExtended: false },
   'claude-opus-4-1':   { contextSize: 200_000, supportsExtended: false },
   'claude-opus-4':     { contextSize: 200_000, supportsExtended: false },
-  'claude-sonnet-4-5': { contextSize: 200_000, supportsExtended: false },
   'claude-sonnet-4':   { contextSize: 200_000, supportsExtended: false },
   'claude-haiku-4-5':  { contextSize: 200_000, supportsExtended: false },
   // Short aliases → current default version
-  'fable':  { contextSize: 200_000, supportsExtended: true },
-  'opus':   { contextSize: 200_000, supportsExtended: true },
-  'sonnet': { contextSize: 200_000, supportsExtended: true },
+  'fable':  { contextSize: 1_000_000, supportsExtended: true },
+  'opus':   { contextSize: 1_000_000, supportsExtended: true },
+  'sonnet': { contextSize: 1_000_000, supportsExtended: true },
   'haiku':  { contextSize: 200_000, supportsExtended: false },
 };
 
@@ -400,12 +451,6 @@ const MODEL_PRICING: Record<string, ModelPricing> = {
   'claude-opus-4-1': { inputPerMToken: 15, cacheWrite5mPerMToken: 18.75, cacheWrite1hPerMToken: 30, cacheReadPerMToken: 1.5, outputPerMToken: 75 },
   'claude-opus-4': { inputPerMToken: 15, cacheWrite5mPerMToken: 18.75, cacheWrite1hPerMToken: 30, cacheReadPerMToken: 1.5, outputPerMToken: 75 },
 };
-
-function normalizeModelId(model: string): string {
-  // Strip an optional [1m]/(1m) suffix (with any leading whitespace, e.g. "opus [1m]")
-  // and a trailing -YYYYMMDD date stamp, then trim so model-id comparisons are exact.
-  return model.trim().replace(/\s*[\[(]1[mM][\])]$/, '').replace(/-\d{8}$/, '').trim();
-}
 
 function lookupPricing(model: string): ModelPricing | undefined {
   return MODEL_PRICING[normalizeModelId(model)] ?? MODEL_PRICING[shortenModel(model)];
@@ -612,6 +657,7 @@ interface SubagentSummary {
   maxMtimeMs: number;
   count: number;
   timestamps: number[];
+  activities: SubagentActivity[];
   input: number;
   cacheRead: number;
   cacheCreation: number;
@@ -628,6 +674,8 @@ interface SubagentSummary {
 interface SubagentFileCache {
   mtimeMs: number;
   size: number;
+
+  toolUseId: string | null;
   input: number;
   cacheRead: number;
   cacheCreation: number;
@@ -645,8 +693,14 @@ function getSubagentMaxMtime(sessionFilePath: string): number {
     let maxMtime = 0;
     for (const file of fs.readdirSync(subagentDir)) {
       if (!file.endsWith('.jsonl')) { continue; }
+      const fp = path.join(subagentDir, file);
+      // Only the .jsonl mtime is folded in. The sidecar .meta.json is written once when
+      // the agent spawns and the .jsonl keeps growing afterwards, so meta_i <= jsonl_i
+      // always holds and stat-ing the sidecar can never raise this maximum (verified
+      // 2026-07-29 across 50 file pairs / 5 sessions: zero cases of a newer sidecar).
+      // Stat-ing it anyway doubled the syscalls on every reconcile for no effect.
       try {
-        const stat = fs.statSync(path.join(subagentDir, file));
+        const stat = fs.statSync(fp);
         if (stat.mtimeMs > maxMtime) { maxMtime = stat.mtimeMs; }
       } catch { /* skip */ }
     }
@@ -670,7 +724,7 @@ function parseSubagentUsage(
   prevFileCache?: Map<string, SubagentFileCache>,
 ): SubagentSummary {
   const result: SubagentSummary = {
-    maxMtimeMs: 0, count: 0, timestamps: [],
+    maxMtimeMs: 0, count: 0, timestamps: [], activities: [],
     input: 0, cacheRead: 0, cacheCreation: 0, output: 0,
     cacheWrite5m: 0, cacheWrite1h: 0, cacheWriteNoBreakdown: 0,
     fileCache: new Map(),
@@ -686,15 +740,24 @@ function parseSubagentUsage(
         if (stat.mtimeMs > result.maxMtimeMs) { result.maxMtimeMs = stat.mtimeMs; }
         result.count++;
         result.timestamps.push(stat.mtimeMs);
+        const metaPath = fp.replace(/\.jsonl$/, '.meta.json');
 
-        // Unchanged file: reuse cached aggregates instead of re-reading.
-        // Falls back to a full read if any cached ID is already counted elsewhere
-        // (main JSONL legacy progress entries) — dedup then needs line granularity.
+        // Unchanged file: reuse cached aggregates instead of re-reading. The sidecar
+        // .meta.json is not part of this key — it is written once at spawn, before the
+        // .jsonl grows, so a cached toolUseId cannot go stale while the .jsonl is
+        // unchanged. Falls back to a full read if any cached ID is already counted
+        // elsewhere (main JSONL legacy progress entries) — dedup then needs line
+        // granularity.
         const cached = prevFileCache?.get(fp);
         if (
           cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size &&
           !cached.messageIds.some(id => countedMessageIds.has(id))
         ) {
+          result.activities.push({
+            agentId: file.startsWith('agent-') ? file.substring('agent-'.length, file.length - '.jsonl'.length) : '',
+            toolUseId: cached.toolUseId,
+            lastActivityMs: stat.mtimeMs,
+          });
           for (const id of cached.messageIds) { countedMessageIds.add(id); }
           result.input += cached.input;
           result.cacheRead += cached.cacheRead;
@@ -707,8 +770,21 @@ function parseSubagentUsage(
           continue;
         }
 
+        // Cache miss: read meta.json now (kept out of the hit path above so an
+        // unchanged file doesn't pay this I/O every refresh).
+        let toolUseId: string | null = null;
+        try {
+          const raw = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+          toolUseId = typeof raw.toolUseId === 'string' ? raw.toolUseId : null;
+        } catch { /* meta.json is optional or may be mid-write */ }
+        result.activities.push({
+          agentId: file.startsWith('agent-') ? file.substring('agent-'.length, file.length - '.jsonl'.length) : '',
+          toolUseId,
+          lastActivityMs: stat.mtimeMs,
+        });
+
         const fileAgg: SubagentFileCache = {
-          mtimeMs: stat.mtimeMs, size: stat.size,
+          mtimeMs: stat.mtimeMs, size: stat.size, toolUseId,
           input: 0, cacheRead: 0, cacheCreation: 0, output: 0,
           cacheWrite5m: 0, cacheWrite1h: 0, cacheWriteNoBreakdown: 0,
           messageIds: [],
@@ -793,6 +869,16 @@ function isSkippableText(text: string): boolean {
   return SKIP_PREFIXES.some(prefix => text.startsWith(prefix));
 }
 
+function extractToolResultText(content: unknown): string | null {
+  // Empty string normalizes to null: an unextractable/empty result must not read as
+  // "completed" text — misjudging stale-vs-completed the wrong way here would mark a
+  // still-running agent as done, so we prefer staying stale over a false completion.
+  if (typeof content === 'string') { return content !== '' ? content : null; }
+  if (!Array.isArray(content)) { return null; }
+  const textBlock = content.find(block => block?.type === 'text' && typeof block.text === 'string' && block.text !== '');
+  return textBlock ? textBlock.text : null;
+}
+
 function createEmptyParseState(): SessionParseState {
   return {
     _byteOffset: 0,
@@ -812,9 +898,13 @@ function createEmptyParseState(): SessionParseState {
     prevContext: 0,
     maxContextSeen: 0,
     hasCompactAbove200K: false,
+    latestAutoCompactPreTokens: null,
     compactBoundaryPending: false,
     agentIds: new Set<string>(),
     agentLastSeen: new Map<string, number>(),
+    completedAgentIds: new Set<string>(),
+    agentToolUseIds: new Set<string>(),
+    finishedAgentToolUseIds: new Set<string>(),
     assistantCount: 0,
     sessionId: '',
     firstUserText: '',
@@ -833,6 +923,9 @@ function cloneParseState(state: SessionParseState): SessionParseState {
     ...state,
     agentIds: new Set(state.agentIds),
     agentLastSeen: new Map(state.agentLastSeen),
+    completedAgentIds: new Set(state.completedAgentIds),
+    agentToolUseIds: new Set(state.agentToolUseIds),
+    finishedAgentToolUseIds: new Set(state.finishedAgentToolUseIds),
     countedMessageIds: new Set(state.countedMessageIds),
   };
 }
@@ -842,14 +935,48 @@ function cloneParseState(state: SessionParseState): SessionParseState {
 // file-history-snapshot, custom-title, system, mode, file-history-delta, and
 // frame-link. Only the records handled below affect session state; others are
 // intentionally ignored. Progress/agent_progress is handled for subagents.
+// Exception: the task-notification scan immediately below runs before JSON parsing
+// and independent of record type, so it affects state even for record types not
+// otherwise handled in this function.
 function processSessionLine(line: string, state: SessionParseState): void {
   if (!line.trim()) { state.lineIdx++; return; }
+  // Raw string match rather than a parsed-type check: the same <task-notification>
+  // can be duplicated across multiple record types (queue-operation / attachment /
+  // user, etc.), so matching on the line text avoids having to enumerate every type
+  // it might appear under.
+  if (line.includes('<task-notification>')) {
+    const taskIdPattern = /<task-id>([^<]+)<\/task-id>/g;
+    let match: RegExpExecArray | null;
+    while ((match = taskIdPattern.exec(line)) !== null) {
+      if (match[1]) { state.completedAgentIds.add(match[1]); }
+    }
+  }
   try {
     const data = JSON.parse(line);
     if (data.type === 'user') { state.lastUserIdx = state.lineIdx; }
     if (data.type === 'assistant') {
       state.lastAssistantIdx = state.lineIdx;
       if (data.message?.stop_reason) { state.lastStopReason = data.message.stop_reason; }
+      const content = data.message?.content;
+      if (Array.isArray(content)) {
+        for (const block of content) {
+          if (block?.type === 'tool_use' && block.name === 'Agent' && typeof block.id === 'string') {
+            state.agentToolUseIds.add(block.id);
+          }
+        }
+      }
+    }
+    if (data.type === 'user') {
+      const content = data.message?.content;
+      if (Array.isArray(content)) {
+        for (const block of content) {
+          if (block?.type !== 'tool_result' || typeof block.tool_use_id !== 'string' || !state.agentToolUseIds.has(block.tool_use_id)) { continue; }
+          const text = extractToolResultText(block.content);
+          if (text !== null && !text.startsWith('Async agent launched successfully')) {
+            state.finishedAgentToolUseIds.add(block.tool_use_id);
+          }
+        }
+      }
     }
     if (data.sessionId && !state.sessionId) { state.sessionId = data.sessionId; }
     if (data.type === 'custom-title' && data.customTitle) {
@@ -894,6 +1021,9 @@ function processSessionLine(line: string, state: SessionParseState): void {
       state.compactCount++;
       if (data.compactMetadata?.trigger === 'manual') { state.compactManualCount++; } else { state.compactAutoCount++; }
       const preTokens = data.compactMetadata?.preTokens || 0;
+      if (data.compactMetadata?.trigger === 'auto' && typeof preTokens === 'number' && Number.isFinite(preTokens) && preTokens > 0) {
+        state.latestAutoCompactPreTokens = preTokens;
+      }
       state.lastCompactFreed = preTokens;
       if (preTokens > DEFAULT_CONTEXT_SIZE) { state.hasCompactAbove200K = true; }
       state.compactBoundaryPending = true;
@@ -1040,6 +1170,9 @@ export function parseSessionJsonl(
     }
     const totalAgentCount = state.agentIds.size > 0 ? state.agentIds.size : subagent.count;
     const agentTimestamps = state.agentIds.size > 0 ? [...state.agentLastSeen.values()] : subagent.timestamps;
+    const subagentActivities = state.agentIds.size > 0
+      ? [...state.agentLastSeen.entries()].map(([agentId, lastActivityMs]) => ({ agentId, toolUseId: null, lastActivityMs }))
+      : subagent.activities;
 
     const inputTokens = state.lastUsage.input_tokens || 0;
     const cacheReadTokens = state.lastUsage.cache_read_input_tokens || 0;
@@ -1047,23 +1180,60 @@ export function parseSessionJsonl(
     const contextUsed = inputTokens + cacheCreationTokens + cacheReadTokens;
     const explicit1m = /[\[(]1[mM][\])]$/.test(state.lastModel) ? 1_000_000 : null;
     // Evidence-based 1M: session held >200K tokens at some point (current peak or pre-compact).
-    // This is the strongest per-session signal — a window that actually exceeded the 200K base
-    // must be extended. It only promotes upward, so it never hides compact pressure.
+    // Role: the 1M promotion used when the Models API can't be read (apiContextMax is null)
+    // and no explicit [1m]/settings override applies — it only promotes upward, so it never
+    // hides compact pressure. This is distinct from the `Math.max(contextMax,
+    // state.maxContextSeen)` floor applied after the full chain resolves below: that floor
+    // is a lower bound enforced on every resolution path (including apiContextMax), not
+    // itself a promotion mechanism.
     const evidenced1m = (state.maxContextSeen > DEFAULT_CONTEXT_SIZE || state.hasCompactAbove200K) ? 1_000_000 : null;
     // Settings-based 1M: weaker than evidenced (reflects the CURRENT settings model, not the
     // model in effect when this session was created). Applied only when the session's model
     // matches the settings model carrying [1m], or when contextWindowOverride comes from
     // GrowthBook (settingsModelNormalized is null → environment-wide, no specific model).
+    // Promotion only: the override must exceed the model's own documented window. The
+    // GrowthBook flag (tengu_hawthorn_window) carries a raw value that is 200K when the
+    // environment is not enrolled in the 1M expansion — applying that verbatim would
+    // demote a model whose own default is already 1M (e.g. claude-opus-5) and understate
+    // its real capacity. Every other entry in this chain promotes upward only; this one
+    // must too.
+    const modelBaseWindow = getContextMaxForModel(state.lastModel);
     const settingsMatch1m = (settings.contextWindowOverride !== null
+      && settings.contextWindowOverride > modelBaseWindow
       && isExtendedContextModel(state.lastModel)
-      && (settings.settingsModelNormalized === null
-          || settingsModelsMatch(state.lastModel, settings.settingsModelNormalized)))
+      && settings.settingsModelNormalized !== null
+      && settingsModelsMatch(state.lastModel, settings.settingsModelNormalized))
       ? settings.contextWindowOverride : null;
-    const contextMax = settings.maxTokensOverride
+    const apiContextMax = getMaxInputTokens(state.lastModel);
+    const hasExplicitOverride = settings.maxTokensOverride !== null;
+    let contextMax = settings.maxTokensOverride
       ?? explicit1m
+      ?? apiContextMax
       ?? evidenced1m
       ?? settingsMatch1m
-      ?? getContextMaxForModel(state.lastModel);
+      ?? modelBaseWindow;
+    // An explicitly configured compact window changes the meaning of preTokens:
+    // it represents that user-selected window rather than the model context window.
+    const hasConfiguredAutoCompactWindow = (
+      settings.autoCompactWindowEnv !== null && settings.autoCompactWindowEnv !== undefined
+    ) || (
+      settings.autoCompactWindow !== null && settings.autoCompactWindow !== undefined
+    );
+    if (!hasExplicitOverride && !hasConfiguredAutoCompactWindow && state.latestAutoCompactPreTokens !== null) {
+      // Inverse of computeAutoCompact's forward calculation (effectiveWindow = window -
+      // outputReserve; compactThreshold = effectiveWindow - COMPACT_BUFFER), so preTokens
+      // + OUTPUT_RESERVE_CAP + COMPACT_BUFFER approximates the window that produced it.
+      // Exact only when outputReserve == OUTPUT_RESERVE_CAP; models whose max output is
+      // below the 20K cap (outputReserve = Math.min(maxOutputTokens, OUTPUT_RESERVE_CAP))
+      // will read as a slightly larger inferredWindow than their true effective window.
+      const inferredWindow = state.latestAutoCompactPreTokens + OUTPUT_RESERVE_CAP + COMPACT_BUFFER;
+      // A large gap is a reliable sign that Claude Code is running a smaller
+      // effective window. Keep this conservative so ordinary threshold variance
+      // (including a later 300K boundary) cannot demote a 1M session.
+      if (contextMax >= inferredWindow * 2) { contextMax = inferredWindow; }
+    }
+    // A physically observed context is a lower bound for the window itself.
+    contextMax = Math.max(contextMax, state.maxContextSeen);
     const autoCompactWindowSettings = settings.autoCompactWindow ?? null;
     const autoCompact = computeAutoCompact(state.lastModel, contextMax, {
       autoCompactWindowEnv: settings.autoCompactWindowEnv ?? undefined,
@@ -1088,8 +1258,10 @@ export function parseSessionJsonl(
 
     let activeAgentCount = 0;
     const now = Date.now();
-    for (const ts of agentTimestamps) {
-      if (now - ts < 15000) { activeAgentCount++; }
+    for (const activity of subagentActivities) {
+      if (getSubagentState(activity.agentId, activity.toolUseId, activity.lastActivityMs, state.completedAgentIds, state.finishedAgentToolUseIds, now) === 'running') {
+        activeAgentCount++;
+      }
     }
 
     const tasksMtime = tasksMtimeMs ?? getTasksMaxMtime(projectDir, state.sessionId);
@@ -1117,6 +1289,9 @@ export function parseSessionJsonl(
       compactManualCount: state.compactManualCount,
       lastCompactFreed: state.lastCompactFreed,
       activeAgentCount, totalAgentCount, _agentTimestamps: agentTimestamps,
+      _subagentActivities: subagentActivities,
+      _completedAgentIds: [...state.completedAgentIds],
+      _finishedAgentToolUseIds: [...state.finishedAgentToolUseIds],
       tasksMtimeMs: tasksMtime,
       subagentMtimeMs: subagent.maxMtimeMs,
       settingsCacheKey,
@@ -1187,11 +1362,7 @@ export function findAllSessionsCached(
             cached.status = getSessionStatus(effectiveMtime, mtime, cached.isActiveTurn, activityChanged, cached.sessionId);
             cached.displayMtimeMs = effectiveMtime;
             // Recalculate activeAgentCount on cache hit (time-dependent)
-            let activeCount = 0;
-            for (const ts of cached._agentTimestamps) {
-              if (now - ts < 15000) { activeCount++; }
-            }
-            cached.activeAgentCount = activeCount;
+            cached.activeAgentCount = countRunningSubagents(cached, now);
             sessions.push(cached);
             continue;
           }
@@ -1268,11 +1439,7 @@ export function findDirtySessionsCached(
         cached.tasksMtimeMs = tasksMtime;
         cached.status = getSessionStatus(effectiveMtime, stat.mtimeMs, cached.isActiveTurn, activityChanged, cached.sessionId);
         cached.displayMtimeMs = effectiveMtime;
-        let activeCount = 0;
-        for (const ts of cached._agentTimestamps) {
-          if (now - ts < 15000) { activeCount++; }
-        }
-        cached.activeAgentCount = activeCount;
+        cached.activeAgentCount = countRunningSubagents(cached, now);
         byPath.set(filePath, cached);
         continue;
       }

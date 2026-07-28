@@ -71,6 +71,12 @@ function httpsRequest(url: string, options: https.RequestOptions): Promise<strin
     const req = https.request(url, options, (res) => {
       let data = '';
       res.on('data', (chunk) => { data += chunk; });
+      // Without this the promise can hang: a response stream that errors after headers
+      // (premature close, malformed chunked encoding) emits neither 'end' here nor,
+      // in some cases, 'error' on the request. inFlight would then never clear and
+      // every later fetchRateLimits() would return the same pending promise until the
+      // extension restarts. Settling twice is harmless — the first call wins.
+      res.on('error', reject);
       res.on('end', () => {
         if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
           resolve(data);
