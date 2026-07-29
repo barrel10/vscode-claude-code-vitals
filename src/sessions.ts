@@ -126,9 +126,9 @@ export interface SessionInfo {
   /** @internal subagent IDs and activity times for state calculation */
   _subagentActivities: SubagentActivity[];
   /** @internal task-notification completion signals from the parent JSONL */
-  _completedAgentIds: string[];
+  _completedAgentIds: ReadonlySet<string>;
   /** @internal completed synchronous Agent tool-use IDs from the parent JSONL */
-  _finishedAgentToolUseIds: string[];
+  _finishedAgentToolUseIds: ReadonlySet<string>;
   /** @internal tasks dir max mtime for activity detection */
   tasksMtimeMs: number;
   /** @internal subagent dir max mtime for cache invalidation */
@@ -163,10 +163,8 @@ export function getSubagentState(
 }
 
 function countRunningSubagents(info: SessionInfo, now: number): number {
-  const completedAgentIds = new Set(info._completedAgentIds);
-  const finishedAgentToolUseIds = new Set(info._finishedAgentToolUseIds);
   return info._subagentActivities.filter(activity =>
-    getSubagentState(activity.agentId, activity.toolUseId, activity.lastActivityMs, completedAgentIds, finishedAgentToolUseIds, now) === 'running'
+    getSubagentState(activity.agentId, activity.toolUseId, activity.lastActivityMs, info._completedAgentIds, info._finishedAgentToolUseIds, now) === 'running'
   ).length;
 }
 
@@ -381,8 +379,8 @@ export function readClaudeSettings(): ClaudeSettings {
 // every session below 200K by 5x (a 54K-token session read as 27% instead of 5.6%), and
 // the guard only ever corrected itself after a session had already crossed 200K — the
 // point where the warning is least useful. A genuinely 200K-capped environment is still
-// handled, by settings.maxTokens / the [1m]-carrying settings model / the GrowthBook
-// window flag, all of which are read before this table.
+// handled by settings.maxTokens / the [1m]-carrying settings model / the Models API,
+// all of which are read before this table.
 // supportsExtended marks models that can reach 1M at all; it gates the settings-derived
 // override in parseSessionJsonl and stays true for the 1M generation.
 // Aliases (fable/opus/sonnet/haiku) map to the current default version.
@@ -399,14 +397,15 @@ export function readClaudeSettings(): ClaudeSettings {
 interface ModelInfo {
   contextSize: number;
   supportsExtended: boolean;
+  defaultMaxOutputTokens?: number;
 }
 
 const MODEL_INFO: Record<string, ModelInfo> = {
-  'claude-fable-5':    { contextSize: 1_000_000, supportsExtended: true },
-  'claude-opus-5':     { contextSize: 1_000_000, supportsExtended: true },
-  'claude-opus-4-8':   { contextSize: 1_000_000, supportsExtended: true },
-  'claude-opus-4-7':   { contextSize: 1_000_000, supportsExtended: true },
-  'claude-opus-4-6':   { contextSize: 1_000_000, supportsExtended: true },
+  'claude-fable-5':    { contextSize: 1_000_000, supportsExtended: true, defaultMaxOutputTokens: 64_000 },
+  'claude-opus-5':     { contextSize: 1_000_000, supportsExtended: true, defaultMaxOutputTokens: 128_000 },
+  'claude-opus-4-8':   { contextSize: 1_000_000, supportsExtended: true, defaultMaxOutputTokens: 64_000 },
+  'claude-opus-4-7':   { contextSize: 1_000_000, supportsExtended: true, defaultMaxOutputTokens: 64_000 },
+  'claude-opus-4-6':   { contextSize: 1_000_000, supportsExtended: true, defaultMaxOutputTokens: 64_000 },
   'claude-sonnet-5':   { contextSize: 1_000_000, supportsExtended: true },
   'claude-sonnet-4-6': { contextSize: 1_000_000, supportsExtended: true },
   'claude-sonnet-4-5': { contextSize: 1_000_000, supportsExtended: true },
@@ -461,19 +460,7 @@ function clampNumber(value: number, min: number, max: number): number {
 }
 
 function getDefaultMaxOutputTokens(model: string): number {
-  const normalized = normalizeModelId(model);
-  if (normalized === 'claude-opus-5') {
-    return 128_000;
-  }
-  if (
-    normalized === 'claude-fable-5' ||
-    normalized === 'claude-opus-4-8' ||
-    normalized === 'claude-opus-4-7' ||
-    normalized === 'claude-opus-4-6'
-  ) {
-    return 64_000;
-  }
-  return 32_000;
+  return MODEL_INFO[normalizeModelId(model)]?.defaultMaxOutputTokens ?? 32_000;
 }
 
 export function computeAutoCompact(
@@ -686,6 +673,10 @@ interface SubagentFileCache {
   messageIds: string[];
 }
 
+export function agentIdFromFilename(fileName: string): string {
+  return fileName.startsWith('agent-') ? fileName.substring('agent-'.length, fileName.length - '.jsonl'.length) : '';
+}
+
 function getSubagentMaxMtime(sessionFilePath: string): number {
   try {
     const sessionId = path.basename(sessionFilePath, '.jsonl');
@@ -716,6 +707,21 @@ function shouldCountMessageUsage(messageId: unknown, countedMessageIds: Set<stri
   if (countedMessageIds.has(messageId)) { return false; }
   countedMessageIds.add(messageId);
   return true;
+}
+
+interface CacheWriteBreakdown {
+  write5m: number;
+  write1h: number;
+  writeNoBreakdown: number;
+}
+
+function getCacheWriteBreakdown(usage: Usage): CacheWriteBreakdown {
+  const e5m = usage.cache_creation?.ephemeral_5m_input_tokens || 0;
+  const e1h = usage.cache_creation?.ephemeral_1h_input_tokens || 0;
+  if (e5m > 0 || e1h > 0) {
+    return { write5m: e5m, write1h: e1h, writeNoBreakdown: 0 };
+  }
+  return { write5m: 0, write1h: 0, writeNoBreakdown: usage.cache_creation_input_tokens || 0 };
 }
 
 function parseSubagentUsage(
@@ -754,7 +760,7 @@ function parseSubagentUsage(
           !cached.messageIds.some(id => countedMessageIds.has(id))
         ) {
           result.activities.push({
-            agentId: file.startsWith('agent-') ? file.substring('agent-'.length, file.length - '.jsonl'.length) : '',
+            agentId: agentIdFromFilename(file),
             toolUseId: cached.toolUseId,
             lastActivityMs: stat.mtimeMs,
           });
@@ -778,7 +784,7 @@ function parseSubagentUsage(
           toolUseId = typeof raw.toolUseId === 'string' ? raw.toolUseId : null;
         } catch { /* meta.json is optional or may be mid-write */ }
         result.activities.push({
-          agentId: file.startsWith('agent-') ? file.substring('agent-'.length, file.length - '.jsonl'.length) : '',
+          agentId: agentIdFromFilename(file),
           toolUseId,
           lastActivityMs: stat.mtimeMs,
         });
@@ -801,14 +807,10 @@ function parseSubagentUsage(
               fileAgg.cacheRead += u.cache_read_input_tokens || 0;
               fileAgg.cacheCreation += u.cache_creation_input_tokens || 0;
               fileAgg.output += u.output_tokens || 0;
-              const e5m = u.cache_creation?.ephemeral_5m_input_tokens || 0;
-              const e1h = u.cache_creation?.ephemeral_1h_input_tokens || 0;
-              if (e5m > 0 || e1h > 0) {
-                fileAgg.cacheWrite5m += e5m;
-                fileAgg.cacheWrite1h += e1h;
-              } else {
-                fileAgg.cacheWriteNoBreakdown += u.cache_creation_input_tokens || 0;
-              }
+              const bd = getCacheWriteBreakdown(u);
+              fileAgg.cacheWrite5m += bd.write5m;
+              fileAgg.cacheWrite1h += bd.write1h;
+              fileAgg.cacheWriteNoBreakdown += bd.writeNoBreakdown;
             }
           } catch { /* skip line */ }
         }
@@ -993,14 +995,10 @@ function processSessionLine(line: string, state: SessionParseState): void {
         state.totalCacheRead += data.message.usage.cache_read_input_tokens || 0;
         state.totalCacheCreation += data.message.usage.cache_creation_input_tokens || 0;
         state.totalOutput += data.message.usage.output_tokens || 0;
-        const e5m = data.message.usage.cache_creation?.ephemeral_5m_input_tokens || 0;
-        const e1h = data.message.usage.cache_creation?.ephemeral_1h_input_tokens || 0;
-        if (e5m > 0 || e1h > 0) {
-          state.totalCacheWrite5m += e5m;
-          state.totalCacheWrite1h += e1h;
-        } else {
-          state.totalCacheWriteNoBreakdown += data.message.usage.cache_creation_input_tokens || 0;
-        }
+        const bd = getCacheWriteBreakdown(data.message.usage);
+        state.totalCacheWrite5m += bd.write5m;
+        state.totalCacheWrite1h += bd.write1h;
+        state.totalCacheWriteNoBreakdown += bd.writeNoBreakdown;
       }
       const ctx = (data.message.usage.input_tokens || 0) +
                   (data.message.usage.cache_creation_input_tokens || 0) +
@@ -1040,14 +1038,10 @@ function processSessionLine(line: string, state: SessionParseState): void {
           state.totalCacheRead += agentUsage.cache_read_input_tokens || 0;
           state.totalCacheCreation += agentUsage.cache_creation_input_tokens || 0;
           state.totalOutput += agentUsage.output_tokens || 0;
-          const ae5m = agentUsage.cache_creation?.ephemeral_5m_input_tokens || 0;
-          const ae1h = agentUsage.cache_creation?.ephemeral_1h_input_tokens || 0;
-          if (ae5m > 0 || ae1h > 0) {
-            state.totalCacheWrite5m += ae5m;
-            state.totalCacheWrite1h += ae1h;
-          } else {
-            state.totalCacheWriteNoBreakdown += agentUsage.cache_creation_input_tokens || 0;
-          }
+          const bd = getCacheWriteBreakdown(agentUsage);
+          state.totalCacheWrite5m += bd.write5m;
+          state.totalCacheWrite1h += bd.write1h;
+          state.totalCacheWriteNoBreakdown += bd.writeNoBreakdown;
         }
       }
     }
@@ -1189,14 +1183,9 @@ export function parseSessionJsonl(
     const evidenced1m = (state.maxContextSeen > DEFAULT_CONTEXT_SIZE || state.hasCompactAbove200K) ? 1_000_000 : null;
     // Settings-based 1M: weaker than evidenced (reflects the CURRENT settings model, not the
     // model in effect when this session was created). Applied only when the session's model
-    // matches the settings model carrying [1m], or when contextWindowOverride comes from
-    // GrowthBook (settingsModelNormalized is null → environment-wide, no specific model).
-    // Promotion only: the override must exceed the model's own documented window. The
-    // GrowthBook flag (tengu_hawthorn_window) carries a raw value that is 200K when the
-    // environment is not enrolled in the 1M expansion — applying that verbatim would
-    // demote a model whose own default is already 1M (e.g. claude-opus-5) and understate
-    // its real capacity. Every other entry in this chain promotes upward only; this one
-    // must too.
+    // matches the settings model carrying [1m].
+    // Promotion only: the override must exceed the model's own documented window to avoid
+    // demoting a model whose default is already 1M.
     const modelBaseWindow = getContextMaxForModel(state.lastModel);
     const settingsMatch1m = (settings.contextWindowOverride !== null
       && settings.contextWindowOverride > modelBaseWindow
@@ -1290,8 +1279,9 @@ export function parseSessionJsonl(
       lastCompactFreed: state.lastCompactFreed,
       activeAgentCount, totalAgentCount, _agentTimestamps: agentTimestamps,
       _subagentActivities: subagentActivities,
-      _completedAgentIds: [...state.completedAgentIds],
-      _finishedAgentToolUseIds: [...state.finishedAgentToolUseIds],
+      // cloneParseState creates new sets, so sharing these references is safe.
+      _completedAgentIds: state.completedAgentIds,
+      _finishedAgentToolUseIds: state.finishedAgentToolUseIds,
       tasksMtimeMs: tasksMtime,
       subagentMtimeMs: subagent.maxMtimeMs,
       settingsCacheKey,

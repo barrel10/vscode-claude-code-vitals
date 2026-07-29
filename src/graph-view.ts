@@ -333,8 +333,6 @@ export class GraphWebviewProvider implements vscode.WebviewViewProvider {
 
   private buildChildRows(session: SessionInfo, graph: GraphData, now: number): ChildRow[] {
     const rows: ChildRow[] = [];
-    const completedAgentIds = new Set(session._completedAgentIds);
-    const finishedAgentToolUseIds = new Set(session._finishedAgentToolUseIds);
     for (let i = 0; i < graph.subagentCount; i++) {
       const meta = graph.subagentMeta[i];
       const label = meta?.label || `Agent ${i + 1}`;
@@ -348,7 +346,7 @@ export class GraphWebviewProvider implements vscode.WebviewViewProvider {
         kind: 'subagent',
         primary: label,
         secondary: shortenModel(meta?.model || session.model),
-        state: getSubagentState(meta?.agentId || '', meta?.toolUseId || null, last, completedAgentIds, finishedAgentToolUseIds, now),
+        state: getSubagentState(meta?.agentId || '', meta?.toolUseId || null, last, session._completedAgentIds, session._finishedAgentToolUseIds, now),
         lastActivityMs: last,
         detail: meta?.description || label,
       });

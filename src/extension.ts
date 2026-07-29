@@ -6,7 +6,7 @@ import * as os from 'os';
 import {
   readClaudeSettings, findAllSessionsCached, findDirtySessionsCached, clearSessionCache,
   ClaudeSettings, getMonitorDir, SortMode, FilterMode, ModelFilter, GroupMode,
-  findUnknownPricingModels, SessionInfo,
+  findUnknownPricingModels, SessionInfo, agentIdFromFilename,
 } from './sessions';
 import { SessionWebviewProvider, OverviewTreeProvider } from './views';
 import { GraphWebviewProvider, GraphData, SubagentMeta } from './graph-view';
@@ -620,9 +620,10 @@ function readSubagentMeta(projectsDir: string, projectDir: string, sessionId: st
           continue;
         }
 
-        const agentId = file.startsWith('agent-') ? file.substring('agent-'.length, file.length - '.jsonl'.length) : '';
+        const agentId = agentIdFromFilename(file);
         let meta: SubagentMeta = { label: `Agent ${idx}`, description: '', model: null, agentId, toolUseId: null, lastActivityMs: stat.mtimeMs };
         let hasMetaDescription = false;
+        let promptDesc: string | undefined;
 
         if (metaMtimeMs > 0) {
           try {
@@ -632,7 +633,7 @@ function readSubagentMeta(projectsDir: string, projectDir: string, sessionId: st
             const agentType = typeof raw.agentType === 'string' ? raw.agentType : '';
             const model = typeof raw.model === 'string' ? raw.model : null;
             const toolUseId = typeof raw.toolUseId === 'string' ? raw.toolUseId : null;
-            const promptDesc = desc ? '' : extractSubagentLabel(fp, stat.size);
+            promptDesc = desc ? '' : extractSubagentLabel(fp, stat.size);
             hasMetaDescription = !!desc;
             meta = {
               label: name || desc || agentType || `Agent ${idx}`,
@@ -650,8 +651,8 @@ function readSubagentMeta(projectsDir: string, projectDir: string, sessionId: st
         // meta.json's own description is reused for both label and description (name
         // absent). Only fall back when meta.json truly had nothing to offer.
         if (!hasMetaDescription && (!meta.description || meta.description === meta.label)) {
-          const desc = extractSubagentLabel(fp, stat.size);
-          if (desc) { meta.description = desc; }
+          if (promptDesc === undefined) { promptDesc = extractSubagentLabel(fp, stat.size); }
+          if (promptDesc) { meta.description = promptDesc; }
         }
 
         if (subagentMetaCache.size > MAX_SUBAGENT_META_CACHE_ENTRIES) {
@@ -670,8 +671,8 @@ function extractSubagentLabel(fp: string, fileSize: number): string {
   try {
     fd = fs.openSync(fp, 'r');
     const buf = Buffer.alloc(Math.min(4096, fileSize));
-    fs.readSync(fd, buf, 0, buf.length, 0);
-    const firstLine = buf.toString('utf8').split(/\r?\n/)[0] || '';
+    const bytesRead = fs.readSync(fd, buf, 0, buf.length, 0);
+    const firstLine = buf.toString('utf8', 0, bytesRead).split(/\r?\n/)[0] || '';
     try {
       const data = JSON.parse(firstLine);
       if (data.type === 'user') {

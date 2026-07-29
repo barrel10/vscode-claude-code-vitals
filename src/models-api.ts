@@ -1,7 +1,6 @@
 import * as fs from 'fs';
-import * as https from 'https';
-import * as os from 'os';
 import * as path from 'path';
+import { httpsRequest, isTokenExpired, resolveOauthToken } from './oauth';
 
 // ─── Types ───
 
@@ -15,20 +14,12 @@ interface ModelsCacheFile {
   models: Record<string, CachedModel>;
 }
 
-interface Credentials {
-  claudeAiOauth?: {
-    accessToken: string;
-    expiresAt?: number;
-  };
-}
-
 // ─── Constants ───
 
 const MODELS_URL = 'https://api.anthropic.com/v1/models?limit=100';
 const CACHE_FILE_NAME = 'model-windows.json';
 const REFRESH_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const BACKOFF_MS = 5 * 60 * 1000;
-const TOKEN_EXPIRY_MARGIN_MS = 5 * 60 * 1000;
 
 // ─── State ───
 
@@ -77,40 +68,6 @@ function writeCache(): void {
     fs.mkdirSync(path.dirname(cachePath), { recursive: true });
     fs.writeFileSync(cachePath, JSON.stringify(cached), 'utf8');
   } catch { /* memory cache remains available */ }
-}
-
-function readEnvToken(): string {
-  const raw = process.env.CLAUDE_CODE_OAUTH_TOKEN;
-  if (!raw) { return ''; }
-  const token = raw.trim();
-  return token && !/[\r\n]/.test(token) ? token : '';
-}
-
-function readCredentials(): Credentials | null {
-  try {
-    return JSON.parse(fs.readFileSync(path.join(os.homedir(), '.claude', '.credentials.json'), 'utf8'));
-  } catch { return null; }
-}
-
-function isTokenExpired(expiresAt: number | undefined): boolean {
-  return expiresAt !== undefined && Date.now() + TOKEN_EXPIRY_MARGIN_MS >= expiresAt;
-}
-
-function httpsRequest(url: string, options: https.RequestOptions): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const request = https.request(url, options, response => {
-      let body = '';
-      response.on('data', chunk => { body += chunk; });
-      response.on('end', () => {
-        if (response.statusCode && response.statusCode >= 200 && response.statusCode < 300) { resolve(body); }
-        else { reject(new Error(`HTTP ${response.statusCode}`)); }
-      });
-      response.on('error', reject);
-    });
-    request.on('error', reject);
-    request.setTimeout(10_000, () => { request.destroy(); reject(new Error('timeout')); });
-    request.end();
-  });
 }
 
 // Compares only maxInputTokens: maxOutputTokens has no reading consumer, so a change to
@@ -181,13 +138,7 @@ export async function refreshModelsApi(useEnvOauthToken: boolean, force = false)
   if (!force && now - cached.fetchedAt < REFRESH_INTERVAL_MS) { return false; }
   if (!force && now < backoffUntil) { return false; }
 
-  let token = useEnvOauthToken ? readEnvToken() : '';
-  let expiresAt: number | undefined;
-  if (!token) {
-    const oauth = readCredentials()?.claudeAiOauth;
-    token = oauth?.accessToken || '';
-    expiresAt = oauth?.expiresAt;
-  }
+  const { token, expiresAt } = resolveOauthToken(useEnvOauthToken);
   if (!token || isTokenExpired(expiresAt)) {
     _log('[models-api] no usable token (missing or expiring soon); skipping refresh');
     return false;

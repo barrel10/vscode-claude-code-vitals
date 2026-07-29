@@ -1,8 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import * as os from 'os';
-import * as https from 'https';
 import * as vscode from 'vscode';
+import { CRED_PATH, httpsRequest, isTokenExpired, readCredentials, readEnvToken, resolveOauthToken } from './oauth';
 
 // ─── Types ───
 
@@ -14,22 +13,12 @@ export interface RateLimitInfo {
   fetchedAt: number;  // Date.now()
 }
 
-interface Credentials {
-  claudeAiOauth?: {
-    accessToken: string;
-    refreshToken: string;
-    expiresAt: number; // Unix ms
-  };
-}
-
 // ─── Constants ───
 
-const CRED_PATH = path.join(os.homedir(), '.claude', '.credentials.json');
 const USAGE_URL = 'https://api.anthropic.com/api/oauth/usage';
 const OAUTH_BETA = 'oauth-2025-04-20';
 const MIN_FETCH_INTERVAL_MS = 60_000;
 const BACKOFF_MS = 300_000;
-const TOKEN_EXPIRY_MARGIN_MS = 300_000; // 5min margin, same as Claude Code
 
 // ─── State ───
 
@@ -44,52 +33,6 @@ let credWatcher: fs.FSWatcher | null = null;
 let fetchGeneration = 0;
 
 // ─── Helpers ───
-
-function readCredentials(): Credentials | null {
-  try {
-    return JSON.parse(fs.readFileSync(CRED_PATH, 'utf8'));
-  } catch { return null; }
-}
-
-function isTokenExpired(expiresAt: number | undefined): boolean {
-  if (!expiresAt) { return false; } // unknown expiry → try anyway
-  return Date.now() + TOKEN_EXPIRY_MARGIN_MS >= expiresAt;
-}
-
-/** Read CLAUDE_CODE_OAUTH_TOKEN from env, trimming whitespace and rejecting control characters.
- *  Returns empty string if the value is absent, blank, or contains \r / \n. */
-function readEnvToken(): string {
-  const raw = process.env.CLAUDE_CODE_OAUTH_TOKEN;
-  if (!raw) { return ''; }
-  const trimmed = raw.trim();
-  if (!trimmed || /[\r\n]/.test(trimmed)) { return ''; }
-  return trimmed;
-}
-
-function httpsRequest(url: string, options: https.RequestOptions): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const req = https.request(url, options, (res) => {
-      let data = '';
-      res.on('data', (chunk) => { data += chunk; });
-      // Without this the promise can hang: a response stream that errors after headers
-      // (premature close, malformed chunked encoding) emits neither 'end' here nor,
-      // in some cases, 'error' on the request. inFlight would then never clear and
-      // every later fetchRateLimits() would return the same pending promise until the
-      // extension restarts. Settling twice is harmless — the first call wins.
-      res.on('error', reject);
-      res.on('end', () => {
-        if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
-          resolve(data);
-        } else {
-          reject(new Error(`HTTP ${res.statusCode}: ${data.substring(0, 200)}`));
-        }
-      });
-    });
-    req.on('error', reject);
-    req.setTimeout(10_000, () => { req.destroy(); reject(new Error('timeout')); });
-    req.end();
-  });
-}
 
 async function fetchUsage(token: string): Promise<RateLimitInfo> {
   const data = await httpsRequest(USAGE_URL, {
@@ -174,18 +117,7 @@ export async function fetchRateLimits(force?: boolean): Promise<RateLimitInfo | 
   if (!force && inFlight) { return inFlight; }
 
   const useEnvOauthToken = vscode.workspace.getConfiguration('claudeCodeVitals').get<boolean>('useEnvOauthToken', false);
-  let token = '';
-  let expiresAt: number | undefined;
-  if (useEnvOauthToken) {
-    token = readEnvToken();
-  }
-
-  if (!token) {
-    const cred = readCredentials();
-    const oauth = cred?.claudeAiOauth;
-    token = oauth?.accessToken || '';
-    expiresAt = oauth?.expiresAt;
-  }
+  const { token, expiresAt } = resolveOauthToken(useEnvOauthToken);
   if (!token) { return cached; }
 
   const tokenChanged = token !== lastAccessToken;
