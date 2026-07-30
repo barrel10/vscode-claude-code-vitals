@@ -1,11 +1,9 @@
 {
   "name": "claude-code-vitals",
   "displayName": "Claude Code Vitals",
-  "publisher": "barrel1054",
   "description": "Real-time token usage monitor for Claude Code sessions — track context window consumption, auto-compact proximity, and multi-session status at a glance",
-  "version": "1.8.2",
+  "version": "1.8.3",
   "license": "MIT",
-  "qna": false,
   "repository": {
     "type": "git",
     "url": "https://github.com/barrel10/vscode-claude-code-vitals"
@@ -14,14 +12,35 @@
     "url": "https://github.com/barrel10/vscode-claude-code-vitals/issues"
   },
   "homepage": "https://github.com/barrel10/vscode-claude-code-vitals#readme",
-  "keywords": ["claude", "anthropic", "token", "monitor", "session", "context", "usage", "status", "thinking", "waiting", "compact", "multi-session", "real-time"],
+  "keywords": [
+    "claude",
+    "anthropic",
+    "token",
+    "monitor",
+    "session",
+    "context",
+    "usage",
+    "status",
+    "thinking",
+    "waiting",
+    "compact",
+    "multi-session",
+    "real-time"
+  ],
   "icon": "media/icon.png",
-  "extensionDependencies": ["anthropic.claude-code"],
+  "extensionDependencies": [
+    "anthropic.claude-code"
+  ],
   "engines": {
     "vscode": "^1.85.0"
   },
-  "categories": ["Other", "Visualization"],
-  "activationEvents": ["onStartupFinished"],
+  "categories": [
+    "Other",
+    "Visualization"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "main": "./out/extension.js",
   "contributes": {
     "viewsContainers": {
@@ -277,7 +296,11 @@
         "claudeCodeVitals.notificationLevel": {
           "type": "string",
           "default": "none",
-          "enum": ["none", "warning", "critical"],
+          "enum": [
+            "none",
+            "warning",
+            "critical"
+          ],
           "enumDescriptions": [
             "%configuration.notificationLevel.none%",
             "%configuration.notificationLevel.warning%",
@@ -304,21 +327,35 @@
         "claudeCodeVitals.defaultSort": {
           "type": "string",
           "default": "time",
-          "enum": ["time", "usage", "compact"],
+          "enum": [
+            "time",
+            "usage",
+            "compact"
+          ],
           "order": 7,
           "description": "%configuration.defaultSort.description%"
         },
         "claudeCodeVitals.defaultFilter": {
           "type": "string",
           "default": "all",
-          "enum": ["all", "warning", "critical"],
+          "enum": [
+            "all",
+            "warning",
+            "critical"
+          ],
           "order": 8,
           "description": "%configuration.defaultFilter.description%"
         },
         "claudeCodeVitals.defaultModelFilter": {
           "type": "string",
           "default": "all",
-          "enum": ["all", "fable", "opus", "sonnet", "haiku"],
+          "enum": [
+            "all",
+            "fable",
+            "opus",
+            "sonnet",
+            "haiku"
+          ],
           "order": 13,
           "description": "%configuration.defaultModelFilter.description%"
         },
@@ -338,7 +375,12 @@
         "claudeCodeVitals.defaultGroup": {
           "type": "string",
           "default": "none",
-          "enum": ["none", "project", "status", "custom"],
+          "enum": [
+            "none",
+            "project",
+            "status",
+            "custom"
+          ],
           "enumDescriptions": [
             "%configuration.defaultGroup.none%",
             "%configuration.defaultGroup.project%",
@@ -351,7 +393,10 @@
         "claudeCodeVitals.progressMode": {
           "type": "string",
           "default": "compact",
-          "enum": ["compact", "context"],
+          "enum": [
+            "compact",
+            "context"
+          ],
           "enumDescriptions": [
             "%configuration.progressMode.compact%",
             "%configuration.progressMode.context%"
@@ -372,12 +417,30 @@
           },
           "order": 10,
           "properties": {
-            "sparkline": { "type": "boolean", "description": "%configuration.cardDisplay.sparkline%" },
-            "model": { "type": "boolean", "description": "%configuration.cardDisplay.model%" },
-            "messages": { "type": "boolean", "description": "%configuration.cardDisplay.messages%" },
-            "compact": { "type": "boolean", "description": "%configuration.cardDisplay.compact%" },
-            "agents": { "type": "boolean", "description": "%configuration.cardDisplay.agents%" },
-            "cost": { "type": "boolean", "description": "%configuration.cardDisplay.cost%" }
+            "sparkline": {
+              "type": "boolean",
+              "description": "%configuration.cardDisplay.sparkline%"
+            },
+            "model": {
+              "type": "boolean",
+              "description": "%configuration.cardDisplay.model%"
+            },
+            "messages": {
+              "type": "boolean",
+              "description": "%configuration.cardDisplay.messages%"
+            },
+            "compact": {
+              "type": "boolean",
+              "description": "%configuration.cardDisplay.compact%"
+            },
+            "agents": {
+              "type": "boolean",
+              "description": "%configuration.cardDisplay.agents%"
+            },
+            "cost": {
+              "type": "boolean",
+              "description": "%configuration.cardDisplay.cost%"
+            }
           },
           "additionalProperties": false
         },
@@ -395,13 +458,34 @@
           },
           "order": 11,
           "properties": {
-            "context": { "type": "boolean", "description": "%configuration.tooltipDisplay.context%" },
-            "compact": { "type": "boolean", "description": "%configuration.tooltipDisplay.compact%" },
-            "messages": { "type": "boolean", "description": "%configuration.tooltipDisplay.messages%" },
-            "tokens": { "type": "boolean", "description": "%configuration.tooltipDisplay.tokens%" },
-            "cost": { "type": "boolean", "description": "%configuration.tooltipDisplay.cost%" },
-            "compacts": { "type": "boolean", "description": "%configuration.tooltipDisplay.compacts%" },
-            "agents": { "type": "boolean", "description": "%configuration.tooltipDisplay.agents%" }
+            "context": {
+              "type": "boolean",
+              "description": "%configuration.tooltipDisplay.context%"
+            },
+            "compact": {
+              "type": "boolean",
+              "description": "%configuration.tooltipDisplay.compact%"
+            },
+            "messages": {
+              "type": "boolean",
+              "description": "%configuration.tooltipDisplay.messages%"
+            },
+            "tokens": {
+              "type": "boolean",
+              "description": "%configuration.tooltipDisplay.tokens%"
+            },
+            "cost": {
+              "type": "boolean",
+              "description": "%configuration.tooltipDisplay.cost%"
+            },
+            "compacts": {
+              "type": "boolean",
+              "description": "%configuration.tooltipDisplay.compacts%"
+            },
+            "agents": {
+              "type": "boolean",
+              "description": "%configuration.tooltipDisplay.agents%"
+            }
           },
           "additionalProperties": false
         }
@@ -409,14 +493,16 @@
     }
   },
   "scripts": {
-    "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "package": "npx @vscode/vsce package --no-dependencies"
+    "package": "npx @vscode/vsce package --no-dependencies",
+    "vscode:prepublish": "npm run compile"
   },
   "devDependencies": {
     "@types/vscode": "^1.85.0",
     "@types/node": "^20.0.0",
     "typescript": "^5.3.0"
-  }
+  },
+  "publisher": "barrel1054",
+  "qna": false
 }

@@ -361,7 +361,9 @@ export class GraphWebviewProvider implements vscode.WebviewViewProvider {
         state: codex.status === 'running' ? 'running' : 'completed',
         lastActivityMs: codex.mtimeMs,
         detail: codex.prompt || codex.subcommand,
-        durationText: formatDuration(codex.mtimeMs - codex.startTime),
+        // On Windows, stat.mtimeMs may not update while the file handle is open,
+        // so use Date.now() for running sessions to show live elapsed time.
+        durationText: formatDuration((codex.status === 'running' ? now : codex.mtimeMs) - codex.startTime),
         filePath: codex.filePath,
       });
     }
