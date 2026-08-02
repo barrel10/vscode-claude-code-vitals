@@ -37,7 +37,7 @@ export type SessionStatus = 'thinking' | 'waiting' | 'idle' | 'inactive';
 const MONITOR_DIR = path.join(os.homedir(), '.claude', 'ide', 'monitor');
 
 function hookStatePath(sessionId: string): string {
-  return path.join(MONITOR_DIR, sessionId + '.state');
+  return path.join(MONITOR_DIR, path.basename(sessionId) + '.state');
 }
 
 export type HookState = 'thinking' | 'waiting' | 'idle';
@@ -452,7 +452,11 @@ const MODEL_PRICING: Record<string, ModelPricing> = {
 };
 
 function lookupPricing(model: string): ModelPricing | undefined {
-  return MODEL_PRICING[normalizeModelId(model)] ?? MODEL_PRICING[shortenModel(model)];
+  const exact = normalizeModelId(model);
+  if (Object.prototype.hasOwnProperty.call(MODEL_PRICING, exact)) { return MODEL_PRICING[exact]; }
+  const short = shortenModel(model);
+  if (Object.prototype.hasOwnProperty.call(MODEL_PRICING, short)) { return MODEL_PRICING[short]; }
+  return undefined;
 }
 
 function clampNumber(value: number, min: number, max: number): number {
@@ -981,9 +985,9 @@ function processSessionLine(line: string, state: SessionParseState): void {
       }
     }
     if (data.sessionId && !state.sessionId) { state.sessionId = data.sessionId; }
-    if (data.type === 'custom-title' && data.customTitle) {
+    if (data.type === 'custom-title' && typeof data.customTitle === 'string' && data.customTitle) {
       state.customTitle = data.customTitle;
-    } else if (data.type === 'ai-title' && data.aiTitle) {
+    } else if (data.type === 'ai-title' && typeof data.aiTitle === 'string' && data.aiTitle) {
       state.aiTitle = data.aiTitle;
     }
     if (data.type === 'assistant' && data.message?.usage) {
@@ -1028,7 +1032,8 @@ function processSessionLine(line: string, state: SessionParseState): void {
     }
     if (data.type === 'progress' && data.data?.type === 'agent_progress' && data.data?.agentId) {
       state.agentIds.add(data.data.agentId);
-      const ts = new Date(data.timestamp || 0).getTime();
+      const parsedTs = new Date(data.timestamp || 0).getTime();
+      const ts = Number.isNaN(parsedTs) ? 0 : parsedTs;
       state.agentLastSeen.set(data.data.agentId, ts);
       const agentUsage = data.data?.message?.message?.usage;
       if (agentUsage) {
@@ -1152,8 +1157,11 @@ export function parseSessionJsonl(
     let totalCacheWrite5m = state.totalCacheWrite5m;
     let totalCacheWrite1h = state.totalCacheWrite1h;
     let totalCacheWriteNoBreakdown = state.totalCacheWriteNoBreakdown;
-    if (state.agentIds.size === 0 && subagent.count > 0) {
-      // New format: no progress entries in main JSONL, agent data in subagent files
+    if (subagent.count > 0) {
+      // Add subagent usage even when legacy progress entries also exist in the main
+      // JSONL (e.g. a session spanning a Claude Code update): subagentCountedMessageIds
+      // is seeded from state.countedMessageIds, so parseSubagentUsage's message-ID
+      // dedup already prevents double-counting anything already tallied above.
       totalInput += subagent.input;
       totalCacheRead += subagent.cacheRead;
       totalCacheCreation += subagent.cacheCreation;
@@ -1162,11 +1170,29 @@ export function parseSessionJsonl(
       totalCacheWrite1h += subagent.cacheWrite1h;
       totalCacheWriteNoBreakdown += subagent.cacheWriteNoBreakdown;
     }
-    const totalAgentCount = state.agentIds.size > 0 ? state.agentIds.size : subagent.count;
-    const agentTimestamps = state.agentIds.size > 0 ? [...state.agentLastSeen.values()] : subagent.timestamps;
-    const subagentActivities = state.agentIds.size > 0
-      ? [...state.agentLastSeen.entries()].map(([agentId, lastActivityMs]) => ({ agentId, toolUseId: null, lastActivityMs }))
-      : subagent.activities;
+    // I-10 merged usage totals across the legacy progress-entry format and the newer
+    // subagent-file format (see the subagent.count block above), but left
+    // totalAgentCount/agentTimestamps/subagentActivities on an exclusive either/or
+    // branch. A session spanning both formats (e.g. mid Claude Code update) needs the
+    // same merge here, or the newer-format agents silently drop out of agent
+    // count/active-status/Graph display. Dedup by agentId where both formats supply
+    // one so the same agent isn't double-counted; subagent-file entries are kept over
+    // legacy entries on a collision since they additionally carry toolUseId (used by
+    // getSubagentState's completion check).
+    const legacyActivities: SubagentActivity[] = [...state.agentLastSeen.entries()]
+      .map(([agentId, lastActivityMs]) => ({ agentId, toolUseId: null, lastActivityMs }));
+    const mergedActivities: SubagentActivity[] = [];
+    const seenAgentIds = new Set<string>();
+    for (const activity of [...subagent.activities, ...legacyActivities]) {
+      if (activity.agentId) {
+        if (seenAgentIds.has(activity.agentId)) { continue; }
+        seenAgentIds.add(activity.agentId);
+      }
+      mergedActivities.push(activity);
+    }
+    const totalAgentCount = mergedActivities.length;
+    const agentTimestamps = mergedActivities.map(a => a.lastActivityMs);
+    const subagentActivities = mergedActivities;
 
     const inputTokens = state.lastUsage.input_tokens || 0;
     const cacheReadTokens = state.lastUsage.cache_read_input_tokens || 0;

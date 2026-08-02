@@ -196,7 +196,11 @@ export class SessionWebviewProvider implements vscode.WebviewViewProvider {
           });
         }
         if (msg.command === 'openFile') {
-          vscode.workspace.openTextDocument(msg.path).then(doc => vscode.window.showTextDocument(doc));
+          vscode.workspace.openTextDocument(msg.path)
+            .then(doc => vscode.window.showTextDocument(doc))
+            .then(undefined, (err) => {
+              vscode.window.showErrorMessage(`Failed to open file: ${msg.path} (${String(err)})`);
+            });
         }
       },
       undefined,
@@ -715,6 +719,8 @@ export class OverviewTreeProvider implements vscode.TreeDataProvider<vscode.Tree
 
   private sessions: SessionInfo[] = [];
   private rateLimit: RateLimitInfo | null = null;
+  private warningThreshold = 75;
+  private criticalThreshold = 95;
   private claudeSettings: ClaudeSettings = {
     maxTokensOverride: null,
     autocompactPct: 95,
@@ -723,8 +729,10 @@ export class OverviewTreeProvider implements vscode.TreeDataProvider<vscode.Tree
     cleanupPeriodDays: 30,
   };
 
-  update(sessions: SessionInfo[], claudeSettings?: ClaudeSettings): void {
+  update(sessions: SessionInfo[], warningThreshold: number, criticalThreshold: number, claudeSettings?: ClaudeSettings): void {
     this.sessions = sessions;
+    this.warningThreshold = warningThreshold;
+    this.criticalThreshold = criticalThreshold;
     if (claudeSettings) { this.claudeSettings = claudeSettings; }
     this._onDidChange.fire();
   }
@@ -772,7 +780,7 @@ export class OverviewTreeProvider implements vscode.TreeDataProvider<vscode.Tree
     }
 
     // Max compact progress
-    const maxColor = maxUsage >= 95 ? 'charts.red' : maxUsage >= 75 ? 'charts.yellow' : 'charts.green';
+    const maxColor = maxUsage >= this.criticalThreshold ? 'charts.red' : maxUsage >= this.warningThreshold ? 'charts.yellow' : 'charts.green';
     addItem('Max usage', total > 0 ? maxUsage.toFixed(0) + '%' : '-', 'graph', maxColor);
 
     // Rate limit

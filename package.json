@@ -1,8 +1,9 @@
 {
   "name": "claude-code-vitals",
   "displayName": "Claude Code Vitals",
-  "description": "Real-time token usage monitor for Claude Code sessions — track context window consumption, auto-compact proximity, and multi-session status at a glance",
-  "version": "1.8.3",
+  "description": "Real-time monitoring of Claude Code sessions — context usage, compact threshold, agent activity, Codex CLI status, and cost tracking in the activity bar",
+  "version": "1.8.4",
+  "publisher": "barrel1054",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -12,21 +13,8 @@
     "url": "https://github.com/barrel10/vscode-claude-code-vitals/issues"
   },
   "homepage": "https://github.com/barrel10/vscode-claude-code-vitals#readme",
-  "keywords": [
-    "claude",
-    "anthropic",
-    "token",
-    "monitor",
-    "session",
-    "context",
-    "usage",
-    "status",
-    "thinking",
-    "waiting",
-    "compact",
-    "multi-session",
-    "real-time"
-  ],
+  "keywords": ["claude", "anthropic", "token", "monitor", "session", "context", "usage", "status", "thinking", "waiting", "compact", "multi-session", "real-time", "cost", "agent", "codex"],
+  "qna": false,
   "icon": "media/icon.png",
   "extensionDependencies": [
     "anthropic.claude-code"
@@ -34,13 +22,8 @@
   "engines": {
     "vscode": "^1.85.0"
   },
-  "categories": [
-    "Other",
-    "Visualization"
-  ],
-  "activationEvents": [
-    "onStartupFinished"
-  ],
+  "categories": ["Other", "Visualization"],
+  "activationEvents": ["onStartupFinished"],
   "main": "./out/extension.js",
   "contributes": {
     "viewsContainers": {

@@ -10,6 +10,7 @@ import {
 } from './sessions';
 import { SessionWebviewProvider, OverviewTreeProvider } from './views';
 import { GraphWebviewProvider, GraphData, SubagentMeta } from './graph-view';
+import { SubagentViewerManager } from './subagent-viewer';
 import { findRecentCodexSessions, getCodexSessionsDir, setCodexLogger, CodexSessionInfo } from './codex';
 import { fetchRateLimits, startCredentialsWatch, stopCredentialsWatch } from './ratelimit';
 import { initializeModelsApi, refreshModelsApi, clearModelsApiBackoff, setModelsApiLogger } from './models-api';
@@ -67,18 +68,23 @@ export function activate(context: vscode.ExtensionContext) {
   initializeModelsApi(context.globalStorageUri.fsPath);
   const projectsDir = path.join(os.homedir(), '.claude', 'projects');
 
+  const subagentViewer = new SubagentViewerManager();
   const graphProvider = new GraphWebviewProvider(async (sessionId) => {
     graphProvider.setFocusedSession(sessionId);
     const cmds = await vscode.commands.getCommands(true);
     if (cmds.includes('claude-vscode.editor.open')) {
-      vscode.commands.executeCommand('claude-vscode.editor.open', sessionId);
+      vscode.commands.executeCommand('claude-vscode.editor.open', sessionId).then(undefined, (err) => {
+        log(`Failed to open editor for session ${sessionId}: ${err}`);
+      });
     }
-  });
+  }, (filePath) => subagentViewer.open(filePath));
   const sessionProvider = new SessionWebviewProvider(async (sessionId) => {
     graphProvider.setFocusedSession(sessionId);
     const cmds = await vscode.commands.getCommands(true);
     if (cmds.includes('claude-vscode.editor.open')) {
-      vscode.commands.executeCommand('claude-vscode.editor.open', sessionId);
+      vscode.commands.executeCommand('claude-vscode.editor.open', sessionId).then(undefined, (err) => {
+        log(`Failed to open editor for session ${sessionId}: ${err}`);
+      });
     } else {
       vscode.window.showWarningMessage('Claude Code extension is not installed. Session focus requires the Claude Code VSCode extension.');
     }
@@ -222,6 +228,11 @@ export function activate(context: vscode.ExtensionContext) {
           if (!watchers.has(s.filePath)) {
             try {
               const w = fs.watch(s.filePath, () => scheduleRefresh(s.filePath));
+              w.on('error', (e) => {
+                log(`Watcher error for ${s.filePath}: ${e}`);
+                w.close();
+                watchers.delete(s.filePath);
+              });
               watchers.set(s.filePath, w);
             } catch (e) { log(`Failed to watch file: ${s.filePath}: ${e}`); }
           }
@@ -246,7 +257,7 @@ export function activate(context: vscode.ExtensionContext) {
     // Sparkline data collection
       const history: UsageHistory = context.globalState.get('usageHistory', {});
       for (const s of sessions) {
-        if (!history[s.sessionId]) { history[s.sessionId] = []; }
+        if (!Object.prototype.hasOwnProperty.call(history, s.sessionId)) { history[s.sessionId] = []; }
         const points = history[s.sessionId];
         const last = points[points.length - 1];
         if (!last || last.u !== s.contextUsed) {
@@ -276,7 +287,7 @@ export function activate(context: vscode.ExtensionContext) {
       const debugGraphStateFile = config.get<string>('debugGraphStateFile', '');
       if (debugGraphStateFile) { writeGraphDebugState(debugGraphStateFile, sessions, graphDataMap); }
 
-      overviewProvider.update(sessions, settings);
+      overviewProvider.update(sessions, warnThreshold, critThreshold, settings);
 
       for (const modelId of findUnknownPricingModels(sessions)) {
         if (reportedUnknownModels.has(modelId)) { continue; }
@@ -422,6 +433,7 @@ export function activate(context: vscode.ExtensionContext) {
   const dirWatchers: fs.FSWatcher[] = [];
   try {
     const dw = fs.watch(projectsDir, () => scheduleRefresh(projectsDir, true));
+    dw.on('error', (e) => log(`Watcher error for ${projectsDir}: ${e}`));
     dirWatchers.push(dw);
     for (const dirent of fs.readdirSync(projectsDir, { withFileTypes: true })) {
       if (!dirent.isDirectory()) { continue; }
@@ -434,6 +446,7 @@ export function activate(context: vscode.ExtensionContext) {
             scheduleRefresh(projPath, true);
           }
         });
+        dw2.on('error', (e) => log(`Watcher error for ${projPath}: ${e}`));
         dirWatchers.push(dw2);
         // Watch subagent directories for agent activity detection
         for (const sub of fs.readdirSync(projPath, { withFileTypes: true })) {
@@ -442,6 +455,7 @@ export function activate(context: vscode.ExtensionContext) {
           try {
             if (fs.existsSync(subagentDir)) {
               const dw3 = fs.watch(subagentDir, () => scheduleRefresh(subagentDir, true));
+              dw3.on('error', (e) => log(`Watcher error for ${subagentDir}: ${e}`));
               dirWatchers.push(dw3);
             }
           } catch { /* skip */ }
@@ -455,6 +469,7 @@ export function activate(context: vscode.ExtensionContext) {
   try {
     if (fs.existsSync(tasksBase)) {
       const tw = fs.watch(tasksBase, { recursive: true }, () => scheduleRefresh(tasksBase, true));
+      tw.on('error', (e) => log(`Watcher error for ${tasksBase}: ${e}`));
       dirWatchers.push(tw);
     }
   } catch (e) { log(`Failed to watch tasks dirs: ${e}`); }
@@ -465,6 +480,7 @@ export function activate(context: vscode.ExtensionContext) {
     const codexWatcher = fs.watch(codexSessionsDir, { recursive: true }, () => {
       scheduleRefresh(undefined, false);
     });
+    codexWatcher.on('error', (e) => log(`Watcher error for ${codexSessionsDir}: ${e}`));
     dirWatchers.push(codexWatcher);
   } catch (e) { log(`Codex sessions dir not found: ${e}`); }
 
@@ -473,6 +489,7 @@ export function activate(context: vscode.ExtensionContext) {
     const monitorDir = getMonitorDir();
     fs.mkdirSync(monitorDir, { recursive: true });
     const monitorWatcher = fs.watch(monitorDir, () => scheduleRefresh(monitorDir, true));
+    monitorWatcher.on('error', (e) => log(`Watcher error for ${monitorDir}: ${e}`));
     dirWatchers.push(monitorWatcher);
   } catch (e) { log(`Failed to watch monitor dir: ${e}`); }
 
@@ -483,11 +500,15 @@ export function activate(context: vscode.ExtensionContext) {
     // Always clean stale entries from settings.json on activation
     cleanGlobalSettingsHooks();
     const settings = readClaudeSettingsJson();
-    const hasHooks = isHookInstalled(settings);
-    if (wantHooks && !hasHooks) {
-      setupHooks(context);
-    } else if (!wantHooks && hasHooks) {
-      removeHooks();
+    if (settings === null) {
+      log('settings.local.json is malformed; skipping hook sync on activation to avoid overwriting it.');
+    } else {
+      const hasHooks = isHookInstalled(settings);
+      if (wantHooks && !hasHooks) {
+        setupHooks(context);
+      } else if (!wantHooks && hasHooks) {
+        removeHooks();
+      }
     }
   }
 
@@ -512,6 +533,7 @@ export function activate(context: vscode.ExtensionContext) {
       stopCredentialsWatch();
       sessionProvider.dispose();
       graphProvider.dispose();
+      subagentViewer.dispose();
     },
   });
 }
@@ -621,7 +643,11 @@ function readSubagentMeta(projectsDir: string, projectDir: string, sessionId: st
         }
 
         const agentId = agentIdFromFilename(file);
-        let meta: SubagentMeta = { label: `Agent ${idx}`, description: '', model: null, agentId, toolUseId: null, lastActivityMs: stat.mtimeMs };
+        const rawBirthtime = stat.birthtimeMs;
+        const startTimeMs = (Number.isFinite(rawBirthtime) && rawBirthtime > 0)
+          ? rawBirthtime
+          : (metaMtimeMs > 0 ? metaMtimeMs : 0);
+        let meta: SubagentMeta = { label: `Agent ${idx}`, description: '', model: null, agentId, toolUseId: null, lastActivityMs: stat.mtimeMs, filePath: fp, startTimeMs };
         let hasMetaDescription = false;
         let promptDesc: string | undefined;
 
@@ -642,6 +668,8 @@ function readSubagentMeta(projectsDir: string, projectDir: string, sessionId: st
               agentId,
               toolUseId,
               lastActivityMs: stat.mtimeMs,
+              filePath: fp,
+              startTimeMs,
             };
           } catch { /* partial write — fall through to JSONL extraction */ }
         }
@@ -660,7 +688,7 @@ function readSubagentMeta(projectsDir: string, projectDir: string, sessionId: st
         }
         subagentMetaCache.set(fp, { mtimeMs: stat.mtimeMs, size: stat.size, metaMtimeMs, meta });
         results.push(meta);
-      } catch { results.push({ label: `Agent ${idx}`, description: '', model: null, agentId: '', toolUseId: null, lastActivityMs: 0 }); }
+      } catch { results.push({ label: `Agent ${idx}`, description: '', model: null, agentId: '', toolUseId: null, lastActivityMs: 0, startTimeMs: 0 }); }
     }
   } catch { /* subagent dir doesn't exist */ }
   return results;
@@ -778,9 +806,32 @@ function getClaudeGlobalSettingsPath(): string {
   return path.join(os.homedir(), '.claude', 'settings.json');
 }
 
-function readClaudeSettingsJson(): Record<string, unknown> {
+// Returns {} when settings.local.json doesn't exist yet (nothing to lose), or null
+// when it exists but fails to parse — callers must treat null as "abort", since
+// proceeding as if the file were empty would let setupHooks/removeHooks overwrite
+// (and lose) the user's existing, merely-malformed settings.
+function readClaudeSettingsJson(): Record<string, unknown> | null {
   const p = getClaudeLocalSettingsPath();
-  try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch { return {}; }
+  let raw: string;
+  try {
+    raw = fs.readFileSync(p, 'utf8');
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException)?.code === 'ENOENT') { return {}; }
+    log(`Failed to read ${p}: ${e}`);
+    return null;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e) {
+    log(`Failed to parse ${p}: ${e}`);
+    return null;
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    log(`${p} does not contain a JSON object; treating as malformed.`);
+    return null;
+  }
+  return parsed as Record<string, unknown>;
 }
 
 function writeClaudeSettingsJson(obj: Record<string, unknown>): void {
@@ -798,16 +849,18 @@ function cleanGlobalSettingsHooks(): void {
   let globalSettings: Record<string, unknown>;
   try { globalSettings = JSON.parse(fs.readFileSync(globalPath, 'utf8')); } catch { return; }
   const hooks = globalSettings.hooks as HooksConfig | undefined;
-  if (!hooks) { return; }
+  if (!hooks || typeof hooks !== 'object' || Array.isArray(hooks)) { return; }
 
   let changed = false;
   for (const event of ALL_OWNED_EVENTS) {
     if (!(event in hooks)) { continue; }
-    const cleaned = filterOurEntries(hooks[event] || []);
+    const raw = hooks[event];
+    if (!Array.isArray(raw)) { continue; }
+    const cleaned = filterOurEntries(raw);
     if (cleaned.length === 0) {
       delete hooks[event];
       changed = true;
-    } else if (cleaned.length !== (hooks[event]?.length ?? 0)) {
+    } else if (cleaned.length !== raw.length) {
       hooks[event] = cleaned;
       changed = true;
     }
@@ -823,7 +876,9 @@ function isHookInstalled(settings: Record<string, unknown>): boolean {
   if (!hooks) { return false; }
   // All events must have an entry with the current HOOK_ID AND point to the current unified script
   return HOOK_EVENTS.every(event => {
-    const ours = hooks[event]?.find(e => e._id === HOOK_ID);
+    const arr = hooks[event];
+    if (!Array.isArray(arr)) { return false; }
+    const ours = arr.find(e => e._id === HOOK_ID);
     return ours && ours.hooks?.some(h => h.command.includes(HOOK_SCRIPT));
   });
 }
@@ -833,7 +888,18 @@ async function setupHooks(context: vscode.ExtensionContext): Promise<void> {
     vscode.window.showWarningMessage('Claude Code is not installed (~/.claude not found). Hooks cannot be set up.');
     return;
   }
-  // 1. Copy hook script (single unified script)
+
+  // 1. Read and validate settings.local.json before any side effects below, so a
+  // malformed file aborts cleanly instead of leaving legacy-script cleanup and the
+  // global settings.json hook cleanup applied without the corresponding
+  // settings.local.json write completing.
+  const settings = readClaudeSettingsJson();
+  if (settings === null) {
+    vscode.window.showErrorMessage('settings.local.json is malformed; fix or remove it before installing hooks.');
+    return;
+  }
+
+  // 2. Copy hook script (single unified script)
   const destDir = getClaudeHooksDir();
   fs.mkdirSync(destDir, { recursive: true });
   const src = path.join(context.extensionPath, 'hooks', HOOK_SCRIPT);
@@ -847,11 +913,10 @@ async function setupHooks(context: vscode.ExtensionContext): Promise<void> {
     try { fs.unlinkSync(path.join(destDir, legacy)); } catch { /* already gone */ }
   }
 
-  // 2. Clean stale entries from settings.json (global) to prevent override conflicts
+  // 3. Clean stale entries from settings.json (global) to prevent override conflicts
   cleanGlobalSettingsHooks();
 
-  // 3. Update settings.local.json
-  const settings = readClaudeSettingsJson();
+  // 4. Update settings.local.json
   if (isHookInstalled(settings)) {
     vscode.window.showInformationMessage('Hooks are already configured.');
     return;
@@ -861,10 +926,9 @@ async function setupHooks(context: vscode.ExtensionContext): Promise<void> {
 
   // Clean up ALL owned entries (including legacy PreToolUse/PostToolUse)
   for (const event of ALL_OWNED_EVENTS) {
-    if (hooks[event]) {
-      hooks[event] = filterOurEntries(hooks[event]);
-      if (hooks[event].length === 0) { delete hooks[event]; }
-    }
+    if (!Array.isArray(hooks[event])) { continue; }
+    hooks[event] = filterOurEntries(hooks[event]);
+    if (hooks[event].length === 0) { delete hooks[event]; }
   }
 
   // Register current events
@@ -888,8 +952,12 @@ async function setupHooks(context: vscode.ExtensionContext): Promise<void> {
 
 async function removeHooks(): Promise<void> {
   const settings = readClaudeSettingsJson();
+  if (settings === null) {
+    vscode.window.showErrorMessage('settings.local.json is malformed; fix or remove it before removing hooks.');
+    return;
+  }
   const hooks = settings.hooks as HooksConfig | undefined;
-  if (!hooks || !ALL_OWNED_EVENTS.some(event => hooks[event]?.some(isOurEntry))) {
+  if (!hooks || !ALL_OWNED_EVENTS.some(event => Array.isArray(hooks[event]) && hooks[event].some(isOurEntry))) {
     vscode.window.showInformationMessage('Hooks are not installed.');
     return;
   }
@@ -897,10 +965,9 @@ async function removeHooks(): Promise<void> {
   // Clean up ALL owned entries from both settings files
   cleanGlobalSettingsHooks();
   for (const event of ALL_OWNED_EVENTS) {
-    if (hooks[event]) {
-      hooks[event] = filterOurEntries(hooks[event]);
-      if (hooks[event].length === 0) { delete hooks[event]; }
-    }
+    if (!Array.isArray(hooks[event])) { continue; }
+    hooks[event] = filterOurEntries(hooks[event]);
+    if (hooks[event].length === 0) { delete hooks[event]; }
   }
   try {
     writeClaudeSettingsJson(settings);

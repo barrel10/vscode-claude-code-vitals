@@ -19,9 +19,11 @@ try {
   process.stdin.on("end", () => {
     try {
       const input = JSON.parse(data);
-      const sid = input.session_id || input.sessionId;
+      const rawSid = input.session_id || input.sessionId;
       const event = input.hook_event_name;
-      if (!sid || !event) process.exit(0);
+      if (!rawSid || !event) process.exit(0);
+      const sid = path.basename(String(rawSid));
+      if (!sid) process.exit(0);
 
       const state = EVENT_STATE[event];
       if (!state) process.exit(0);

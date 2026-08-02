@@ -115,9 +115,6 @@ export function initializeModelsApi(globalStoragePath: string): string {
   return cachePath;
 }
 
-/** Resolved cache file path. Not called from the extension itself — the path is an
- *  absolute one containing the OS user name, so it is only written to the log on the
- *  failure path. This accessor exists for the out-of-repo verification scripts. */
 export function getModelsApiCachePath(): string {
   return cachePath;
 }

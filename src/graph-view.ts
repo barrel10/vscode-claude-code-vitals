@@ -10,6 +10,11 @@ export interface SubagentMeta {
   toolUseId: string | null;
   /** Last activity of this subagent (JSONL file mtime). 0 = unknown. */
   lastActivityMs: number;
+  /** Absolute path to this subagent's JSONL file. */
+  filePath?: string;
+  /** Start-time proxy: JSONL birthtimeMs, or meta.json mtimeMs where birthtime is
+   *  unavailable (0/NaN on some filesystems). 0 = unknown. */
+  startTimeMs: number;
 }
 
 export interface GraphData {
@@ -104,8 +109,8 @@ body {
   padding: 2px 4px;
   border-radius: 3px;
 }
-.child-row.codex { cursor: pointer; }
-.child-row.codex:hover { background: var(--vscode-list-hoverBackground); }
+.child-row[data-cmd] { cursor: pointer; }
+.child-row[data-cmd]:hover { background: var(--vscode-list-hoverBackground); }
 .status-dot {
   font-size: 7px;
   line-height: 1;
@@ -164,7 +169,7 @@ body {
 }
 `;
 
-function escapeHtml(text: string): string {
+export function escapeHtml(text: string): string {
   return text
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
@@ -203,6 +208,7 @@ export class GraphWebviewProvider implements vscode.WebviewViewProvider {
 
   constructor(
     private readonly _onFocusSession: (sessionId: string) => void,
+    private readonly _onOpenSubagent: (filePath: string) => void,
   ) {}
 
   setFocusedSession(sessionId: string): void {
@@ -268,7 +274,14 @@ export class GraphWebviewProvider implements vscode.WebviewViewProvider {
       this._onFocusSession(msg.sessionId);
     }
     if (msg.command === 'openCodexFile' && msg.path) {
-      vscode.workspace.openTextDocument(msg.path).then(doc => vscode.window.showTextDocument(doc));
+      vscode.workspace.openTextDocument(msg.path)
+        .then(doc => vscode.window.showTextDocument(doc))
+        .then(undefined, (err) => {
+          vscode.window.showErrorMessage(`Failed to open file: ${msg.path} (${String(err)})`);
+        });
+    }
+    if (msg.command === 'openSubagentFile' && msg.path) {
+      this._onOpenSubagent(msg.path);
     }
     if (msg.command === 'refreshGraph') {
       this._onRefresh?.();
@@ -342,13 +355,21 @@ export class GraphWebviewProvider implements vscode.WebviewViewProvider {
       // subagentMeta.length) is the row an unnamed "Agent N" placeholder, and the
       // positional timestamp the best available signal.
       const last = meta ? meta.lastActivityMs : (graph.subagentTimestamps[i] || 0);
+      const state = getSubagentState(meta?.agentId || '', meta?.toolUseId || null, last, session._completedAgentIds, session._finishedAgentToolUseIds, now);
+      const startMs = meta?.startTimeMs || 0;
+      let durationText: string | undefined;
+      if (startMs > 0 && last > 0) {
+        durationText = formatDuration((state === 'running' ? now : last) - startMs);
+      }
       rows.push({
         kind: 'subagent',
         primary: label,
         secondary: shortenModel(meta?.model || session.model),
-        state: getSubagentState(meta?.agentId || '', meta?.toolUseId || null, last, session._completedAgentIds, session._finishedAgentToolUseIds, now),
+        state,
         lastActivityMs: last,
         detail: meta?.description || label,
+        durationText,
+        filePath: meta?.filePath,
       });
     }
     for (const codex of graph.codexSessions) {
@@ -378,8 +399,8 @@ export class GraphWebviewProvider implements vscode.WebviewViewProvider {
   private renderChildRow(row: ChildRow, fullscreen: boolean): string {
     const stateText = row.state;
     const cls = `child-row ${row.kind} ${stateText}`;
-    const cmdAttr = row.kind === 'codex'
-      ? ` data-cmd="openCodexFile" data-path="${escapeHtml(row.filePath || '')}"`
+    const cmdAttr = row.filePath
+      ? ` data-cmd="${row.kind === 'codex' ? 'openCodexFile' : 'openSubagentFile'}" data-path="${escapeHtml(row.filePath)}"`
       : '';
     const tipLines = [row.detail, `status: ${stateText}`];
     if (row.lastActivityMs > 0) { tipLines.push(`last activity: ${formatRelativeTime(row.lastActivityMs)} ago`); }
@@ -482,6 +503,10 @@ ${blocks}
     while (el && el !== document.body) {
       if (el.dataset && el.dataset.cmd === 'openCodexFile') {
         vscode.postMessage({ command: 'openCodexFile', path: el.dataset.path });
+        return;
+      }
+      if (el.dataset && el.dataset.cmd === 'openSubagentFile') {
+        vscode.postMessage({ command: 'openSubagentFile', path: el.dataset.path });
         return;
       }
       if (el.dataset && el.dataset.cmd === 'focusClaudeSession') {

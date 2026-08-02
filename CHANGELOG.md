@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.8.4 (2026-08-03)
+
+### Added
+- Subagent Viewer: click a subagent row in the Agent Graph to open a formatted log viewer (conversation, tool calls with results, raw JSONL inspector) in an editor tab
+- Subagent rows now show elapsed duration and start time (JSONL birthtime with meta.json fallback)
+- Claude Opus 5 support with model pricing and context window detection
+- Models API integration: context windows are now fetched from the Anthropic API (24-hour cache) instead of relying solely on a hand-maintained table
+
+### Fixed
+- 22 bugs identified and fixed through a multi-model review loop (Sol/Luna/Sonnet5/Fable):
+  - **Data loss**: `settings.local.json` parse failure no longer silently overwrites existing settings with hook-only content; read errors (EACCES, EBUSY) are now distinguished from missing files
+  - **Security**: `session_id` in hook scripts and state file paths is now sanitized with `path.basename()` to prevent path traversal
+  - **Crash prevention**: hooks config type validation (Array.isArray guards), customTitle/aiTitle string type checks, fs.watch error listeners on all watchers, NaN timestamp guard, `__proto__` sessionId prototype pollution prevention
+  - **Display accuracy**: Overview warning/critical colors now use user-configured thresholds instead of hardcoded 75/95; `codex exec` with read-only sandbox no longer misclassified as review; Codex running detection uses persistent `lastGrowthMs` for Windows mtime lag; legacy and new-format subagent usage/counts are merged instead of exclusive
+  - **Error handling**: `openTextDocument` and `executeCommand` promise rejections are now caught; `setupHooks` validates settings before performing side effects
+- Running Codex session duration now uses `Date.now()` instead of `stat.mtimeMs` (which doesn't update on Windows while the file handle is open)
+- Shared OAuth/HTTP infrastructure extracted to `oauth.ts`, reducing code duplication in ratelimit and models-api modules
+
 ## 1.8.1 (2026-07-29)
 
 ### Fixed

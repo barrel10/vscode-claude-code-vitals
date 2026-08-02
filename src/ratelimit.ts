@@ -70,12 +70,14 @@ export function startCredentialsWatch(onRefreshed?: () => void): void {
   // Try watching the file directly; fall back to parent dir if file doesn't exist yet
   try {
     credWatcher = fs.watch(CRED_PATH, () => { onCredentialsChanged(); });
+    credWatcher.on('error', () => { /* ignore */ });
   } catch {
     try {
       const credDir = path.dirname(CRED_PATH);
       credWatcher = fs.watch(credDir, (_: string, filename: string | null) => {
         if (filename === path.basename(CRED_PATH)) { onCredentialsChanged(); }
       });
+      credWatcher.on('error', () => { /* ignore */ });
     } catch { /* ~/.claude doesn't exist */ }
   }
 }

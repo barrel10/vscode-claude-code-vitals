@@ -27,7 +27,7 @@ export function setCodexLogger(logger: (msg: string) => void): void { _log = log
 
 type CachedCodexHeader = Omit<CodexSessionInfo, 'status'>;
 
-const headerCache = new Map<string, { mtimeMs: number; size: number; header: CachedCodexHeader; terminated: boolean }>();
+const headerCache = new Map<string, { mtimeMs: number; size: number; header: CachedCodexHeader; terminated: boolean; lastGrowthMs: number }>();
 
 export function getCodexSessionsDir(): string {
   return path.join(CODEX_HOME, 'sessions');
@@ -63,8 +63,18 @@ export function parseCodexRolloutHeader(filePath: string): CodexSessionInfo | nu
     const stat = fs.statSync(filePath);
     const cached = headerCache.get(filePath);
     if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
-      return withCurrentStatus(cached.header, cached.terminated);
+      return withCurrentStatus(cached.header, cached.terminated, cached.lastGrowthMs);
     }
+    // On Windows, mtime can lag behind an actual write for a long-lived session; a
+    // changed file size vs. the cached entry is independent evidence of recent
+    // activity. A one-shot "sizeChanged" flag only covered the single call that
+    // observed the growth — the very next poll's cache-hit path above had no way to
+    // recall it, so running/completed flapped every other cycle while mtime stayed
+    // stale. lastGrowthMs persists the timestamp of the last observed size change in
+    // the cache entry itself so every read path (including the cache hit above) can
+    // use it.
+    const sizeChanged = cached !== undefined && cached.size !== stat.size;
+    const lastGrowthMs = sizeChanged ? Date.now() : (cached?.lastGrowthMs ?? 0);
     const lines = readHeaderLines(filePath, MAX_HEADER_LINES);
     const header = parseHeaderLines(lines, filePath, stat.mtimeMs);
     if (!header) { return null; }
@@ -72,14 +82,14 @@ export function parseCodexRolloutHeader(filePath: string): CodexSessionInfo | nu
     if (headerCache.size > MAX_HEADER_CACHE_ENTRIES) {
       headerCache.clear();
     }
-    headerCache.set(filePath, { mtimeMs: stat.mtimeMs, size: stat.size, header, terminated });
-    return withCurrentStatus(header, terminated);
+    headerCache.set(filePath, { mtimeMs: stat.mtimeMs, size: stat.size, header, terminated, lastGrowthMs });
+    return withCurrentStatus(header, terminated, lastGrowthMs);
   } catch {
     return null;
   }
 }
 
-function withCurrentStatus(header: CachedCodexHeader, terminated: boolean): CodexSessionInfo {
+function withCurrentStatus(header: CachedCodexHeader, terminated: boolean, lastGrowthMs = 0): CodexSessionInfo {
   return {
     sessionId: header.sessionId,
     startTime: header.startTime,
@@ -87,7 +97,7 @@ function withCurrentStatus(header: CachedCodexHeader, terminated: boolean): Code
     model: header.model,
     status: terminated
       ? 'completed'
-      : Date.now() - header.mtimeMs < UNTERMINATED_RUNNING_LIMIT_MS ? 'running' : 'completed',
+      : (Date.now() - Math.max(header.mtimeMs, lastGrowthMs) < UNTERMINATED_RUNNING_LIMIT_MS) ? 'running' : 'completed',
     prompt: header.prompt,
     subcommand: header.subcommand,
     filePath: header.filePath,
@@ -237,7 +247,7 @@ function parseHeaderLines(lines: string[], filePath: string, mtimeMs: number): C
     }
   }
 
-  if (approvalPolicy === 'never' && sandboxPolicy.includes('read')) {
+  if (subcommand !== 'exec' && approvalPolicy === 'never' && sandboxPolicy.includes('read')) {
     subcommand = 'review';
   }
 
