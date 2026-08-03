@@ -209,6 +209,7 @@ export class GraphWebviewProvider implements vscode.WebviewViewProvider {
   constructor(
     private readonly _onFocusSession: (sessionId: string) => void,
     private readonly _onOpenSubagent: (filePath: string) => void,
+    private readonly _onOpenCodex: (filePath: string) => void,
   ) {}
 
   setFocusedSession(sessionId: string): void {
@@ -274,11 +275,7 @@ export class GraphWebviewProvider implements vscode.WebviewViewProvider {
       this._onFocusSession(msg.sessionId);
     }
     if (msg.command === 'openCodexFile' && msg.path) {
-      vscode.workspace.openTextDocument(msg.path)
-        .then(doc => vscode.window.showTextDocument(doc))
-        .then(undefined, (err) => {
-          vscode.window.showErrorMessage(`Failed to open file: ${msg.path} (${String(err)})`);
-        });
+      this._onOpenCodex(msg.path);
     }
     if (msg.command === 'openSubagentFile' && msg.path) {
       this._onOpenSubagent(msg.path);

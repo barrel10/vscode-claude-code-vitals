@@ -2,7 +2,7 @@
   "name": "claude-code-vitals",
   "displayName": "Claude Code Vitals",
   "description": "Real-time monitoring of Claude Code sessions — context usage, compact threshold, agent activity, Codex CLI status, and cost tracking in the activity bar",
-  "version": "1.8.4",
+  "version": "1.8.5",
   "publisher": "barrel1054",
   "license": "MIT",
   "repository": {

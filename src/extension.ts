@@ -77,7 +77,7 @@ export function activate(context: vscode.ExtensionContext) {
         log(`Failed to open editor for session ${sessionId}: ${err}`);
       });
     }
-  }, (filePath) => subagentViewer.open(filePath));
+  }, (filePath) => subagentViewer.open(filePath), (filePath) => subagentViewer.openCodex(filePath));
   const sessionProvider = new SessionWebviewProvider(async (sessionId) => {
     graphProvider.setFocusedSession(sessionId);
     const cmds = await vscode.commands.getCommands(true);

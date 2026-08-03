@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.8.5 (2026-08-03)
+
+### Added
+- Codex Rollout Viewer: click a Codex session row in the Agent Graph to open a formatted rollout viewer with conversation bubbles, tool call/result pairing, thinking blocks, and a raw JSONL inspector
+- Shared viewer infrastructure (`viewer-common.ts`): unified types, constants, rendering, and HTML generation for both Claude subagent and Codex rollout viewers
+
+### Changed
+- Subagent viewer refactored to use shared viewer infrastructure (no functional change for Claude subagent logs)
+
+### Fixed
+- 10 bugs found and fixed through formal 4-model review (Sol/Luna/Sonnet5/reviewer + Fable aggregation, 2 rounds):
+  - **Data loss**: pending agent event mirror suppression now checks ring buffer membership, preventing text loss when event entry is evicted before its response mirror arrives
+  - **Data loss**: `task_complete` dedup uses per-turn Map with ring-aware seq tracking instead of a plain Set, preventing final answer loss when the original entry is evicted
+  - **Data loss**: wrapper detection applied per content block instead of after concatenation, preventing real user prompt loss or harness text leakage in multi-block messages
+  - **Display**: error markers with detail text now render with red styling (entry.level CSS class was missing in detail branch)
+  - Ring buffer, tool output rescue, and dedup redesign in Codex parser (3 prior review rounds)
+
 ## 1.8.4 (2026-08-03)
 
 ### Added

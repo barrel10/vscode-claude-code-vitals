@@ -294,7 +294,7 @@ function extractInputText(content: unknown): string {
 
 // Harness-injected wrappers (AGENTS.md, environment info) are recorded as
 // user messages but are not the actual prompt.
-function isWrapperText(text: string): boolean {
+export function isWrapperText(text: string): boolean {
   const t = text.trimStart();
   return t.startsWith('<user_instructions')
     || t.startsWith('<environment_context')
