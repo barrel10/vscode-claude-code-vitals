@@ -101,7 +101,7 @@ function withCurrentStatus(header: CachedCodexHeader, terminated: boolean, lastG
     prompt: header.prompt,
     subcommand: header.subcommand,
     filePath: header.filePath,
-    mtimeMs: header.mtimeMs,
+    mtimeMs: Math.max(header.mtimeMs, lastGrowthMs),
   };
 }
 // The tail window may cut the leading line in half at its start boundary.
